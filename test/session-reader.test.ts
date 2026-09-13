@@ -233,7 +233,9 @@ test('buildOverview reports session-level stats from a real session', async (t) 
     session.turns.filter((turn) => turn.kind === 'tool_call').length,
   );
   assert.ok(overview.stats.turns > 0);
-  assert.equal(overview.stats.fileChangeSource, session.stats.fileChanges.length ? 'observed' : 'derived');
+  const { observed, derived, candidate } = overview.stats.filesByProvenance;
+  assert.equal(observed + derived + candidate, overview.stats.filesChanged, 'provenance must cover every row');
+  assert.equal(candidate, 0, 'a candidate path is never a changed file');
 });
 
 test('classifyUserTurn separates corrections from nudges and pasted reports', () => {
@@ -424,6 +426,27 @@ test('token usage separates cache replays from real input', async (t) => {
   // A 200k-context session cannot have tens of millions of input tokens.
   assert.ok(input < 10_000_000, `input ${input} looks like cache reads counted as input`);
   if (cacheRead !== undefined) assert.ok(cacheRead >= 0);
+});
+
+test('the file ledger has one row count, whichever way you ask', async (t) => {
+  for (const provider of ['codex', 'antigravity', 'claude'] as const) {
+    const session = await newestOf(provider);
+    if (!session) continue;
+    const files = fileLedger(session);
+    const overview = buildOverview(session);
+
+    // Groups tile the ledger: every row belongs to exactly one of them.
+    const grouped = (['project', 'runtime', 'log'] as const).reduce(
+      (total, group) => total + files.filter((file) => file.group === group).length,
+      0,
+    );
+    assert.equal(grouped, files.length, `${provider}: groups must cover every row`);
+    assert.equal(overview.stats.filesChanged, files.length, `${provider}: overview disagrees with the ledger`);
+    assert.equal(overview.writes.length, files.length, `${provider}: overview rows disagree with the ledger`);
+    // Actions are counted per write, so they can exceed distinct files but never fall short.
+    assert.ok(overview.stats.fileChangeEvents >= files.length, `${provider}: fewer actions than files`);
+  }
+  t.diagnostic('file counts agree across overview, ledger and groups');
 });
 
 test('stats.errors matches the error ledger exactly', async (t) => {

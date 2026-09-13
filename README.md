@@ -207,6 +207,7 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 - **轮次边界按时间对齐，不按下标**。codex 原生边界（12 个）比用户消息（15 条）少，按下标取耗时会错位。
 - **token 把缓存复用单列**。claude 每次请求的真实 `input_tokens` 平均只有 2，而 `cache_read_input_tokens` 平均 30 万（重读整个缓存前缀）；把后者计入输入会让一个 20 万上下文的会话显示成 1.16 亿 token。现在 `input` 只含真正写入模型的部分，缓存复用记在 `cacheRead`。
 - **失败只有一个定义**：exit code 明确非 0，或 exit code 未知但 provider 标了错。`stats.errors` 与 `1session errors` 永远是同一个数。
+- **文件也只有一个账本**。`overview` 的统计、`overview --json` 的 `writes`、`1session files --group all` 三者行数恒等，且 `project + runtime + log` 必须刚好铺满（有测试钉住）。`filesChanged` 是去重后的文件数，`fileChangeEvents` 是写动作次数（同一文件写三次算三次），两者定义不同所以可以不等。混合账本不给单一来源标签，而是给 `observed / derived` 的分项计数。
 - **远程写会带 host**。命令形如 `ssh user@host '…'` 时，其中的写标记为 `host:/path`；但 `scp remote:src local_dst` 是往本地写，host 只认目标端自己写明的那个。
 
 ## 测试

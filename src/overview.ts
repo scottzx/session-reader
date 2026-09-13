@@ -1,11 +1,13 @@
 import path from 'node:path';
 import { clip, oneLine } from './util/text.js';
-import { analyzableCommand, fileWrites, type FileWrite } from './writes.js';
+import { analyzableCommand, fileWrites } from './writes.js';
 import { summarizeTurns } from './turns.js';
 import { classifyUserTurn } from './classify.js';
 import { commandLedger, displayPath, errorLedger, fileLedger, jobCounts, jobLedger } from './ledger.js';
 import type {
   FileGroup,
+  FileRecord,
+  Provenance,
   GitCommit,
   TurnSummary,
   NormalizedSession,
@@ -143,20 +145,27 @@ function collectPitfalls(turns: TurnEvent[]): string[] {
   return out;
 }
 
-function buildStats(session: NormalizedSession, writes: FileWrite[], turnCount: number): SessionStats {
+function buildStats(session: NormalizedSession, files: FileRecord[], turnCount: number): SessionStats {
   const jobs = jobLedger(session);
   const commands = commandLedger(session);
+  // One write action per extraction, before the ledger dedupes by path.
+  const writeActions =
+    session.turns.reduce((total, turn) => total + fileWrites(turn).length, 0) +
+    session.stats.fileChanges.length;
   const events = { user: 0, assistant: 0, thinking: 0, tool_call: 0, tool_result: 0 } as Record<TurnKind, number>;
   for (const turn of session.turns) events[turn.kind]++;
 
   const provider = session.stats;
-  const providerFiles = new Set(provider.fileChanges.map((change) => change.path));
   return {
     turns: turnCount,
     events,
-    filesChanged: providerFiles.size || writes.length,
-    fileChangeEvents: provider.fileChanges.length || writes.length,
-    fileChangeSource: providerFiles.size ? 'observed' : 'derived',
+    // Single definition, shared with `1session files`.
+    filesChanged: files.length,
+    fileChangeEvents: writeActions,
+    filesByProvenance: files.reduce(
+      (counts, file) => ({ ...counts, [file.provenance]: counts[file.provenance] + 1 }),
+      { observed: 0, derived: 0, candidate: 0 } as Record<Provenance, number>,
+    ),
     commands: commands.length,
     // One definition of "failed", shared with `1session errors`.
     errors: errorLedger(session).length,
@@ -201,8 +210,8 @@ function render(
 ): string {
   const workspace = session.ref.workspace;
   const { session: ref, stats, goal, corrections, nudges, pastes, anchors, pitfalls } = overview;
+  const files = overview.writes;
   const final = finalState(session, summaries);
-  const files = fileLedger(session);
   const byGroup = (group: FileGroup) => files.filter((file) => file.group === group);
   const cmd = (record?: { command: string; exitCode?: number; eventIndex?: number; turn?: number }) =>
     record
@@ -243,9 +252,11 @@ function render(
     '| 轮次 | 事件 | 文件 | 命令 | 失败 | 提交 | 产物 | 上传 | 作业 |',
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     `| ${stats.turns} | ${Object.values(stats.events).reduce((a, b) => a + b, 0)} | ` +
-      `${stats.filesChanged}（${stats.fileChangeEvents} 次${stats.fileChangeSource === 'derived' ? '·派生' : ''}） | ` +
+      `${stats.filesChanged}（${stats.fileChangeEvents} 次写） | ` +
       `${stats.commands} | ${stats.errors} | ${stats.commits.length} | ${stats.artifacts.length} | ` +
       `${stats.uploads.length} | ${stats.jobs.length} |`,
+    '',
+    `文件溯源：observed ${stats.filesByProvenance.observed} · derived ${stats.filesByProvenance.derived}`,
     '',
     `事件构成：${Object.entries(stats.events).map(([kind, n]) => `${kind} ${n}`).join(' · ')}` +
       (stats.tokens
@@ -339,13 +350,21 @@ function render(
     '### 项目文件',
     '',
     project.length
-      ? project.map((file) => `- ${displayPath(file, workspace)}　\`T${file.turn}\``).join('\n')
+      ? project
+          .map(
+            (file) =>
+              `- ${displayPath(file, workspace)}　\`${file.extractor}${file.eventIndex >= 0 ? ` E${file.eventIndex}` : ''} · T${file.turn}\``,
+          )
+          .join('\n')
       : '- （无）',
     '',
     '### 运行态文件',
     '',
     runtime.length
-      ? runtime.slice(0, 15).map((file) => `- ${displayPath(file, workspace)}`).join('\n') +
+      ? runtime
+          .slice(0, 15)
+          .map((file) => `- ${displayPath(file, workspace)}　\`${file.extractor}\``)
+          .join('\n') +
         (runtime.length > 15 ? `\n- …另有 ${runtime.length - 15} 个` : '')
       : '- （无）',
     '',
@@ -381,19 +400,7 @@ function render(
  * knowing before deciding which turn to open.
  */
 export function buildOverview(session: NormalizedSession): SessionOverview {
-  const writeMap = new Map<string, FileWrite>();
-  for (const turn of session.turns) {
-    for (const write of fileWrites(turn)) {
-      const key = `${write.host ?? ''}|${write.path}`;
-      if (!writeMap.has(key)) writeMap.set(key, write);
-    }
-  }
-  for (const change of session.stats.fileChanges) {
-    const key = `|${change.path}`;
-    if (!writeMap.has(key)) {
-      writeMap.set(key, { path: change.path, provenance: 'observed', extractor: 'item:FileChange' });
-    }
-  }
+  const files = fileLedger(session);
 
   const userTurns = session.turns.filter((turn) => turn.kind === 'user' && turn.text?.trim());
   const notes: UserTurnNote[] = userTurns.slice(1).map((turn) => ({
@@ -402,18 +409,17 @@ export function buildOverview(session: NormalizedSession): SessionOverview {
     text: oneLine(turn.text, 400),
   }));
   const lastAssistant = [...session.turns].reverse().find((turn) => turn.kind === 'assistant' && turn.text?.trim());
-  const writes = [...writeMap.values()];
 
   const summaries = summarizeTurns(session);
   const overview: Omit<SessionOverview, 'markdown'> = {
     session: session.ref,
-    stats: buildStats(session, writes, summaries.length),
+    stats: buildStats(session, files, summaries.length),
     goal: clip(userTurns[0]?.text, 1200),
     corrections: notes.filter((note) => note.kind === 'correction'),
     nudges: notes.filter((note) => note.kind === 'nudge').length,
     pastes: notes.filter((note) => note.kind === 'paste').length,
     anchors: collectAnchors(session, summaries),
-    writes,
+    writes: files,
     pitfalls: collectPitfalls(session.turns),
     lastWord: clip(lastAssistant?.text, 800),
   };

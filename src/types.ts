@@ -245,11 +245,12 @@ export interface GitCommit {
 export interface SessionStats {
   turns: number;
   events: Record<TurnKind, number>;
-  /** Distinct files touched. */
+  /** Distinct files touched — always equals the file ledger's row count. */
   filesChanged: number;
-  /** Individual change records — a file edited three times counts three. */
+  /** Write actions observed — a file written three times counts three. */
   fileChangeEvents: number;
-  fileChangeSource: Provenance;
+  /** How the ledger's rows break down — a single label would misdescribe a mix. */
+  filesByProvenance: Record<Provenance, number>;
   commands: number;
   errors: number;
   commits: GitCommit[];
@@ -293,7 +294,8 @@ export interface SessionOverview {
       provenance: Provenance;
     }[];
   };
-  writes: { path: string; provenance: Provenance; extractor: string; host?: string; event?: number }[];
+  /** The file ledger itself — the same rows `1session files` prints. */
+  writes: FileRecord[];
   pitfalls: string[];
   lastWord: string;
   markdown: string;

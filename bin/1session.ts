@@ -187,13 +187,14 @@ async function main(): Promise<void> {
       const session = await load(positional[0]);
       const wanted = str(flags.group) as FileGroup | 'all' | undefined;
       const records = fileLedger(session).filter((record) =>
-        wanted === 'all' || wanted === undefined ? record.group !== 'log' : record.group === wanted,
+        // `all` means all; only the default view hides logs.
+        wanted === 'all' ? true : wanted === undefined ? record.group !== 'log' : record.group === wanted,
       );
       print(
         json,
         records,
         [
-          `${records.length} 个文件${wanted ? `（group=${wanted}）` : '（默认不含 log，用 --group log 查看）'}`,
+          `${records.length} 个文件${wanted ? `（group=${wanted}）` : '（默认不含 log，用 --group all 看全部）'}`,
           '',
           ...records.map(
             (record) =>
