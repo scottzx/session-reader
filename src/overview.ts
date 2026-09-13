@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { clip, oneLine } from './util/text.js';
-import { fileWrites, rawCommand, type FileWrite } from './writes.js';
+import { analyzableCommand, fileWrites, type FileWrite } from './writes.js';
 import { summarizeTurns } from './turns.js';
 import { classifyUserTurn } from './classify.js';
 import { commandLedger, displayPath, errorLedger, fileLedger, jobCounts, jobLedger } from './ledger.js';
@@ -53,7 +53,7 @@ function collectAnchors(
     const body = `${turn.toolArgs ? JSON.stringify(turn.toolArgs) : ''}\n${turn.toolResult ?? ''}`;
     if (!body.trim()) continue;
     const at = turnAt(turn.index);
-    const command = rawCommand(turn);
+    const command = analyzableCommand(turn);
     for (const match of command ? command.matchAll(SSH_HOST) : []) {
       if (match[1]) hosts.set(match[1], (hosts.get(match[1]) ?? 0) + 1);
     }
@@ -106,7 +106,7 @@ function collectCommits(turns: TurnEvent[]): GitCommit[] {
       else byMessage.set(key(message), { sha: echoed[2], message, timestamp: turn.timestamp });
       continue;
     }
-    const command = rawCommand(turn);
+    const command = analyzableCommand(turn);
     const matched = command ? /git commit[^\n]*?-m\s+(?:'([^']+)'|"([^"]+)")/.exec(command) : undefined;
     const text = matched?.[1] ?? matched?.[2];
     if (!text) continue;
@@ -145,11 +145,7 @@ function buildStats(session: NormalizedSession, writes: FileWrite[], turnCount: 
   const jobs = jobLedger(session);
   const commands = commandLedger(session);
   const events = { user: 0, assistant: 0, thinking: 0, tool_call: 0, tool_result: 0 } as Record<TurnKind, number>;
-  let flaggedErrors = 0;
-  for (const turn of session.turns) {
-    events[turn.kind]++;
-    if (turn.kind === 'tool_result' && turn.isError) flaggedErrors++;
-  }
+  for (const turn of session.turns) events[turn.kind]++;
 
   const provider = session.stats;
   const providerFiles = new Set(provider.fileChanges.map((change) => change.path));
@@ -160,7 +156,8 @@ function buildStats(session: NormalizedSession, writes: FileWrite[], turnCount: 
     fileChangeEvents: provider.fileChanges.length || writes.length,
     fileChangeSource: providerFiles.size ? 'provider' : 'inferred',
     commands: commands.length,
-    errors: commands.filter((record) => (record.exitCode ?? 0) !== 0).length || flaggedErrors,
+    // One definition of "failed", shared with `1session errors`.
+    errors: errorLedger(session).length,
     commits: collectCommits(session.turns),
     branches: provider.branches,
     models: provider.models,
@@ -205,8 +202,11 @@ function render(
   const final = finalState(session, summaries);
   const files = fileLedger(session);
   const byGroup = (group: FileGroup) => files.filter((file) => file.group === group);
-  const cmd = (record?: { command: string; exitCode?: number; timestamp?: string }) =>
-    record ? `\`exit ${record.exitCode ?? '?'}\` ${oneLine(record.command, 150)}` : '（无）';
+  const cmd = (record?: { command: string; exitCode?: number; eventIndex?: number; turn?: number }) =>
+    record
+      ? `\`exit ${record.exitCode ?? '?'}\` ${oneLine(record.command, 140)}` +
+        `　\`E${record.eventIndex} · T${record.turn}\``
+      : '（无）';
 
   const lines = [
     `# 会话事实 · ${ref.provider}:${ref.id.slice(0, 8)}`,
@@ -225,15 +225,16 @@ function render(
     '',
     `- 最后一条用户请求：${oneLine(final.lastUser?.text, 150) || '（无）'}`,
     `- 最后一条 assistant：${oneLine(final.lastAssistant?.text, 150) || '（无）'}`,
-    `- 最后一次工具调用：#${final.lastToolCall?.index ?? '?'} ${final.lastToolCall?.toolName ?? '（无）'}`,
+    `- 最后一次工具调用：${final.lastToolCall?.toolName ?? '（无）'}　\`E${final.lastToolCall?.index ?? '?'}\``,
     `- 最后一条成功命令：${cmd(final.lastOk)}`,
     `- 最后一条失败命令：${cmd(final.lastFailed)}`,
-    `- 最后改动的文件：${final.lastFile ? displayPath(final.lastFile, workspace) : '（无）'}`,
+    `- 最后改动的文件：${final.lastFile ? `${displayPath(final.lastFile, workspace)}　\`T${final.lastFile.turn}\`` : '（无）'}`,
     ...(final.unfinishedTurns.length
       ? [`- 未正常收尾的轮次：${final.unfinishedTurns.map((turn) => `T${turn.no}(${turn.status})`).join('、')}`]
       : []),
     '',
     '> 当前主线 / 阻塞 / 下一步属语义层，本阶段不生成。',
+    '> 每条事实后的 `E<事件号> · T<轮次>` 可直接下钻：`1session turn <id> <T> --event <E>`。',
     '',
     '## 统计',
     '',
@@ -246,7 +247,8 @@ function render(
     '',
     `事件构成：${Object.entries(stats.events).map(([kind, n]) => `${kind} ${n}`).join(' · ')}` +
       (stats.tokens
-        ? `　｜　token：入 ${formatCount(stats.tokens.input)} / 出 ${formatCount(stats.tokens.output)}`
+        ? `　｜　token：入 ${formatCount(stats.tokens.input)} / 出 ${formatCount(stats.tokens.output)}` +
+          (stats.tokens.cacheRead ? `（另有 ${formatCount(stats.tokens.cacheRead)} 缓存复用）` : '')
         : ''),
     ...(Object.keys(stats.extras).length
       ? ['', `其他：${Object.entries(stats.extras).map(([k, n]) => `${k} ${n}`).join(' · ')}`]
@@ -298,7 +300,9 @@ function render(
         .map(
           (job) =>
             `- [${job.status}] ${job.log ?? job.id}${job.pid ? ` pid ${job.pid}` : ''}` +
-            `${job.host ? ` @${job.host}` : ''}\n  ${job.evidence.join('；')}`,
+            `${job.host ? ` @${job.host}` : ''}` +
+            `${job.discoveredFrom !== undefined ? `　\`E${job.discoveredFrom}\`` : ''}` +
+            `\n  ${job.evidence.join('；')}`,
         ),
       ...(stats.jobs.length > 12 ? [`- …另有 ${stats.jobs.length - 12} 个，用 1session jobs 查看`] : []),
       '',
@@ -332,7 +336,9 @@ function render(
   lines.push(
     '### 项目文件',
     '',
-    project.length ? project.map((file) => `- ${displayPath(file, workspace)}`).join('\n') : '- （无）',
+    project.length
+      ? project.map((file) => `- ${displayPath(file, workspace)}　\`T${file.turn}\``).join('\n')
+      : '- （无）',
     '',
     '### 运行态文件',
     '',
@@ -354,7 +360,7 @@ function render(
         .slice(0, 12)
         .map(
           (record) =>
-            `- \`exit ${record.exitCode ?? '?'}\` ${oneLine(record.command, 120)}` +
+            `- \`exit ${record.exitCode ?? '?'}\` ${oneLine(record.command, 120)}　\`E${record.eventIndex} · T${record.turn}\`` +
             `${record.laterSucceeded ? '　→ 同前缀命令后续成功过' : ''}` +
             `${record.stderr ? `\n  ${oneLine(record.stderr, 150)}` : ''}`,
         ),

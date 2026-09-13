@@ -142,6 +142,14 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 
 所以 overview 回答的是"**最后一条成功命令是什么**"，而不是"当前阻塞是什么"；给出"末态事实"而不是"进度判断"。语义层留白处会显式写明 `属语义层，本阶段不生成`，不假装。
 
+**先证明发生了文件操作，再抽路径**——而不是看到像路径的字符串就当成文件。具体地：here-doc 的正文（正在被写入的数据）在分析前会被剥离，否则里面的源码会伪装成命令——`(a, b) => b[1].length` 里的 `>` 会被当成重定向，payload 里的 `ssh admin@1.2.3.4` 会被当成真连过的主机。裸 token 还必须带真实扩展名，否则 `r.source`、`a.name` 都会被当成文件。
+
+每条事实后面带 **Evidence Handle**（`E<事件号> · T<轮次>`），可以直接下钻验证：
+
+```bash
+1session turn 3ab9fe0e 9 --event 491
+```
+
 同样的原则贯穿每一处：**没有证据就不断言**。异步作业只在有完成回执时标 `completed`，否则一律 `unknown` 并写明依据；没有打印 exit code 的命令结果，`exitCode` 就是空，绝不补成 0。
 
 ## 轮次完成状态
@@ -176,6 +184,8 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 - **轮次边界按"其后最近开始的那一轮"归属**。`task_started` 总比该轮第一个事件早几秒（12:41:06 vs 12:41:13），按"落在窗口内"匹配会全部落空。
 - **统计优先用各家自己记的结构化数据，而不是我们推断**。codex 的 `event_msg/item_completed` 里有 `FileChange`（带 diff）、`CommandExecution`（带 pid/cwd）、`task_started/task_complete`（轮次边界 + 耗时）与 `token_usage_record`；claude 每条都带 `gitBranch`/`model`/`usage`；antigravity 的产物、上传、后台任务分别在 brain 目录、`.user_uploaded/` 与 `.system_generated/{tasks,messages}/`。统计里 `fileChangeSource` 会标明这次是 `provider` 还是 `inferred`。
 - **轮次边界按时间对齐，不按下标**。codex 原生边界（12 个）比用户消息（15 条）少，按下标取耗时会错位。
+- **token 把缓存复用单列**。claude 每次请求的真实 `input_tokens` 平均只有 2，而 `cache_read_input_tokens` 平均 30 万（重读整个缓存前缀）；把后者计入输入会让一个 20 万上下文的会话显示成 1.16 亿 token。现在 `input` 只含真正写入模型的部分，缓存复用记在 `cacheRead`。
+- **失败只有一个定义**：exit code 明确非 0，或 exit code 未知但 provider 标了错。`stats.errors` 与 `1session errors` 永远是同一个数。
 - **远程写会带 host**。命令形如 `ssh user@host '…'` 时，其中的写标记为 `host:/path`；但 `scp remote:src local_dst` 是往本地写，host 只认目标端自己写明的那个。
 
 ## 测试

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { isInside } from './util/paths.js';
 import { oneLine } from './util/text.js';
-import { fileWrites, rawCommand, resolveWritePath } from './writes.js';
+import { analyzableCommand, fileWrites, rawCommand, resolveWritePath } from './writes.js';
 import { summarizeTurns } from './turns.js';
 import type {
   AsyncJob,
@@ -61,7 +61,13 @@ export function commandLedger(session: NormalizedSession): CommandRecord[] {
       source: 'parsed',
       ...(host ? { host } : {}),
       ...(event.timestamp ? { timestamp: event.timestamp } : {}),
-      ...(result?.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+      // An explicit status wins; otherwise "provider did not flag an error"
+      // is itself the provider's verdict, not a guess of ours.
+      ...(result?.exitCode !== undefined
+        ? { exitCode: result.exitCode }
+        : result && result.isError === false
+          ? { exitCode: 0 }
+          : {}),
       ...(result?.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
       ...(result?.isError && result.toolResult ? { stderr: oneLine(result.toolResult, 300) } : {}),
     });
@@ -69,10 +75,16 @@ export function commandLedger(session: NormalizedSession): CommandRecord[] {
   return records;
 }
 
-/** Failed commands, plus whether a similar command later succeeded. */
+/**
+ * Failed commands, plus whether a similar command later succeeded.
+ * A command counts as failed only on a non-zero exit, or on an unknown exit
+ * that the provider itself flagged — never merely because stderr had content.
+ */
 export function errorLedger(session: NormalizedSession): CommandRecord[] {
   const commands = commandLedger(session);
-  const failed = commands.filter((record) => (record.exitCode ?? 0) !== 0 || record.stderr);
+  const failed = commands.filter(
+    (record) => (record.exitCode !== undefined && record.exitCode !== 0) || (record.exitCode === undefined && record.stderr),
+  );
   const prefix = (command: string) => command.split(/\s+/).slice(0, 3).join(' ');
   return failed.map((record) => ({
     ...record,
@@ -100,7 +112,7 @@ export function jobLedger(session: NormalizedSession): AsyncJob[] {
   }
 
   for (const event of session.turns) {
-    const command = rawCommand(event);
+    const command = analyzableCommand(event);
     if (!command || !BACKGROUND.test(command)) continue;
     const segment = command.split(/[\n;]|&&/).find((part) => BACKGROUND.test(part)) ?? command;
     const log = LOG_PATH.exec(segment)?.[1] ?? LOG_PATH.exec(command)?.[1];

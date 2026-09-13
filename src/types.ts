@@ -70,6 +70,8 @@ export interface TokenUsage {
   input: number;
   output: number;
   total: number;
+  /** Prefix replays served from cache — reported separately, never as input. */
+  cacheRead?: number;
 }
 
 export interface TurnBoundary {

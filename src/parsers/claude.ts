@@ -29,6 +29,7 @@ interface Block {
 interface Entry {
   type?: string;
   uuid?: string;
+  requestId?: string;
   timestamp?: string;
   cwd?: string;
   gitBranch?: string;
@@ -38,12 +39,16 @@ interface Entry {
   title?: string;
   attachment?: { type?: string };
   message?: {
+    id?: string;
     role?: string;
     content?: unknown;
     model?: string;
     usage?: Record<string, number>;
   };
 }
+
+/** Claude prefixes a failed shell result with its exit status. */
+const EXIT_CODE = /^\s*Exit code (\d+)/;
 
 /** `tool_result.content` is either a string or a list of text blocks. */
 function flattenResult(content: unknown): string {
@@ -121,6 +126,9 @@ export const claudeAdapter: ProviderAdapter = {
     const turns: TurnEvent[] = [];
     const stats = emptyProviderStats();
     const tokens: TokenUsage = { input: 0, output: 0, total: 0 };
+    let cacheRead = 0;
+    // One assistant message can appear on several entries; count its usage once.
+    const countedUsage = new Set<string>();
     let title: string | undefined;
     let firstPrompt: string | undefined;
     let workspace: string | undefined;
@@ -145,9 +153,14 @@ export const claudeAdapter: ProviderAdapter = {
       const model = entry.message?.model;
       if (model && !stats.models.includes(model)) stats.models.push(model);
       const usage = entry.message?.usage;
-      if (usage) {
-        tokens.input += (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+      const usageKey = entry.message?.id ?? entry.requestId ?? entry.uuid;
+      if (usage && usageKey && !countedUsage.has(usageKey)) {
+        countedUsage.add(usageKey);
+        // Cache reads are prefix replays, not input: counting them as input
+        // turns a 200k-context session into "116M tokens".
+        tokens.input += (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
         tokens.output += usage.output_tokens ?? 0;
+        cacheRead += usage.cache_read_input_tokens ?? 0;
       }
       if (entry.isSidechain) stats.extras.sidechain = (stats.extras.sidechain ?? 0) + 1;
       if (entry.type === 'attachment' && entry.attachment?.type) {
@@ -187,14 +200,18 @@ export const claudeAdapter: ProviderAdapter = {
               timestamp,
             });
             break;
-          case 'tool_result':
+          case 'tool_result': {
+            const text = flattenResult(block.content);
+            const exit = EXIT_CODE.exec(text);
             push({
               kind: 'tool_result',
-              toolResult: flattenResult(block.content),
+              toolResult: text,
               isError: block.is_error === true,
               timestamp,
+              ...(exit ? { exitCode: Number(exit[1]) } : {}),
             });
             break;
+          }
           default:
             break;
         }
@@ -217,7 +234,13 @@ export const claudeAdapter: ProviderAdapter = {
       stats: {
         ...stats,
         ...(tokens.input || tokens.output
-          ? { tokens: { ...tokens, total: tokens.input + tokens.output } }
+          ? {
+              tokens: {
+                ...tokens,
+                total: tokens.input + tokens.output,
+                ...(cacheRead ? { cacheRead } : {}),
+              },
+            }
           : {}),
       },
     };

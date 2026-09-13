@@ -31,6 +31,21 @@ const SHELL_TOOLS = new Set(['bash', 'run_command', 'shell', 'exec', 'local_shel
 const COMMAND_ARGS = ['command', 'CommandLine', 'cmd', 'input'];
 
 const PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm;
+/** Extensions we accept on a bare token. Without this, `a.name` looks like a file. */
+const KNOWN_EXT =
+  /\.(?:ts|tsx|js|jsx|mjs|cjs|json|jsonl|md|markdown|txt|csv|tsv|ya?ml|toml|ini|conf|cfg|sh|bash|zsh|fish|py|rb|go|rs|java|c|h|cpp|hpp|sql|html|css|scss|sql|log|png|jpe?g|gif|webp|svg|pdf|zip|tar|gz|safetensors|pt|pth|bin|lock|env|gitignore|dockerfile|patch|diff)$/i;
+
+/**
+ * Drops here-document bodies before scanning. Their content is data being
+ * written, not commands — and when the payload is source code, its arrow
+ * functions and string literals otherwise masquerade as redirects and hosts.
+ */
+export function stripHeredocs(command: string): string {
+  return command.replace(
+    /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm,
+    (match) => match.slice(0, match.indexOf('\n') + 1),
+  );
+}
 /** `user@host` in an ssh/scp invocation — the bare `-o opt` forms carry no host. */
 const SSH_HOST = /\b(?:ssh|scp|rsync)\b[^\n;|]*?\b[\w.-]+@([\w.-]+)/;
 
@@ -40,7 +55,8 @@ const SHELL_PATTERNS: { via: string; re: RegExp; group?: number }[] = [
   { via: 'sed -i', re: /\bsed\b[^\n;|]*?\s-i(?:\.\w+)?\s[^\n;|]*?\s(?:'([^']+)'|"([^"]+)"|([^\s'";|&)]+))\s*(?=$|[;|&\n'"])/g },
   { via: 'write_text', re: /(?:'([^']+)'|"([^"]+)")\s*\)?\s*\.write_text\(/g },
   { via: 'open(w)', re: /\bopen\(\s*(?:'([^']+)'|"([^"]+)")\s*,\s*['"][wa]/g },
-  { via: 'redirect', re: /(?<![0-9&])>>?\s*(?:'([^']+)'|"([^"]+)"|([^\s'";|&<>)]+))/g },
+  // `=>` and `>=` are code, not redirection.
+  { via: 'redirect', re: /(?<![0-9&=<>])>>?\s*(?:'([^']+)'|"([^"]+)"|([^\s'";|&<>)]+))/g },
 ];
 
 function firstGroup(match: RegExpMatchArray): string | undefined {
@@ -66,7 +82,9 @@ function looksWritable(candidate: string): boolean {
   // Shell commands are often embedded in JSON/JS blobs; anything carrying
   // structural punctuation is a fragment of the wrapper, not a real path.
   if (/["`{}()<>,;|&$\n]/.test(candidate)) return false;
-  return candidate.includes('/') || /\.\w{1,6}$/.test(candidate);
+  if (/\[|\]/.test(candidate)) return false;
+  // A bare token must carry a real file extension; `r.source` is a property.
+  return candidate.includes('/') || KNOWN_EXT.test(candidate);
 }
 
 /**
@@ -105,6 +123,15 @@ export function rawCommand(turn: TurnEvent): string | undefined {
 }
 
 /**
+ * The command as it should be analysed: here-doc payloads removed, so that
+ * data being written never gets mistaken for commands being run.
+ */
+export function analyzableCommand(turn: TurnEvent): string | undefined {
+  const raw = rawCommand(turn);
+  return raw ? stripHeredocs(raw) : undefined;
+}
+
+/**
  * Files a single tool call wrote. Explicit writes come from dedicated edit
  * tools; inferred ones are parsed out of shell commands (heuristic — agents
  * that write through the shell would otherwise leave no trace at all).
@@ -130,8 +157,10 @@ export function fileWrites(turn: TurnEvent): FileWrite[] {
     }
   }
 
-  const command = rawCommand(turn);
-  if (command) {
+  const raw = rawCommand(turn);
+  if (raw) {
+    // Everything below reads the command, never the here-doc payload.
+    const command = stripHeredocs(raw);
     const host = SSH_HOST.exec(command)?.[1];
     const add = (candidate: string, via: string, viaHost: string | undefined) => {
       if (!looksWritable(candidate)) return;

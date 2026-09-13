@@ -15,7 +15,7 @@ import { buildOverview } from '../src/overview.js';
 import { classifyUserTurn } from '../src/classify.js';
 import { eventDetail, summarizeTurns, turnDetail } from '../src/turns.js';
 import { commandLedger, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
-import { fileWrites, resolveWritePath } from '../src/writes.js';
+import { fileWrites, resolveWritePath, stripHeredocs } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
 
@@ -381,4 +381,55 @@ test('turn status is evidence-backed and never invented', async (t) => {
       assert.ok(turn.evidence.some((line) => line.includes('推进指令')));
     }
   }
+});
+
+test('stripHeredocs keeps the command but drops the payload being written', () => {
+  const command = "cat > src/x.ts <<'EOF'\nconst f = (a) => a.kind;\nEOF";
+  const stripped = stripHeredocs(command);
+  assert.match(stripped, /cat > src\/x\.ts/);
+  assert.doesNotMatch(stripped, /a\.kind/);
+});
+
+test('source code written through a here-doc never becomes a fact', () => {
+  const turn = (command: string): TurnEvent => ({
+    id: 't',
+    index: 0,
+    kind: 'tool_call',
+    toolName: 'Bash',
+    toolArgs: { command },
+  });
+  const paths = (command: string) => fileWrites(turn(command)).map((write) => write.path);
+
+  // Arrow functions are code, not redirects.
+  assert.deepEqual(paths('const f = (a, b) => b[1].length;'), []);
+  // Property access is not a file, however much it looks like one.
+  assert.deepEqual(paths('cp r.source a.name'), []);
+  // Only the real redirect survives a here-doc full of source code.
+  const written = fileWrites(
+    turn("cat > src/x.ts <<'EOF'\nconst g = (x) => x.kind;\nssh admin@1.2.3.4 'echo hi'\nEOF"),
+  );
+  assert.deepEqual(written.map((write) => write.path), ['src/x.ts']);
+  // A host mentioned inside the payload must not be attributed to the write.
+  assert.equal(written[0]!.host, undefined);
+});
+
+test('token usage separates cache replays from real input', async (t) => {
+  const session = await newestOf('claude');
+  if (!session?.stats.tokens) return t.skip('no claude session with usage');
+  const { input, output, cacheRead } = session.stats.tokens;
+  assert.ok(input > 0 && output > 0);
+  // A 200k-context session cannot have tens of millions of input tokens.
+  assert.ok(input < 10_000_000, `input ${input} looks like cache reads counted as input`);
+  if (cacheRead !== undefined) assert.ok(cacheRead >= 0);
+});
+
+test('stats.errors matches the error ledger exactly', async (t) => {
+  for (const provider of ['codex', 'antigravity', 'claude'] as const) {
+    const session = await newestOf(provider);
+    if (!session) continue;
+    const overview = buildOverview(session);
+    assert.equal(overview.stats.errors, errorLedger(session).length, `${provider} error counts disagree`);
+    assert.equal(overview.stats.commands, commandLedger(session).length, `${provider} command counts disagree`);
+  }
+  t.diagnostic('checked every provider with a local session');
 });
