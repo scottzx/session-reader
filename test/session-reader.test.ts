@@ -233,7 +233,7 @@ test('buildOverview reports session-level stats from a real session', async (t) 
     session.turns.filter((turn) => turn.kind === 'tool_call').length,
   );
   assert.ok(overview.stats.turns > 0);
-  assert.equal(overview.stats.fileChangeSource, session.stats.fileChanges.length ? 'provider' : 'inferred');
+  assert.equal(overview.stats.fileChangeSource, session.stats.fileChanges.length ? 'observed' : 'derived');
 });
 
 test('classifyUserTurn separates corrections from nudges and pasted reports', () => {
@@ -298,7 +298,8 @@ test('commandLedger uses the provider ledger when codex records one', async (t) 
   const commands = commandLedger(session);
   if (!commands.length) return t.skip('session ran no commands');
 
-  assert.ok(commands.every((record) => record.source === 'provider'));
+  assert.ok(commands.every((record) => record.provenance === 'observed'));
+  assert.ok(commands.every((record) => record.extractor === 'item:CommandExecution'));
   assert.equal(commands.length, session.stats.commands.length);
   // exit codes come from the provider, never from guessing at output text
   assert.ok(commands.some((record) => record.exitCode !== undefined));
@@ -313,7 +314,7 @@ test('antigravity command records take exit codes from the printed status only',
   const commands = commandLedger(session);
   if (!commands.length) return t.skip('session ran no commands');
 
-  assert.ok(commands.every((record) => record.source === 'parsed'));
+  assert.ok(commands.every((record) => record.provenance === 'derived'));
   // A result without a printed status must not be reported as a success.
   const results = session.turns.filter((turn) => turn.kind === 'tool_result');
   const printed = results.filter((turn) => /The command exited with code/.test(turn.toolResult ?? ''));
@@ -353,6 +354,8 @@ test('fileLedger separates project files from runtime and log noise', async (t) 
   if (!files.length) return t.skip('session wrote no files');
 
   for (const record of files) {
+    assert.ok(record.extractor.length > 0, 'every file record must name its extractor');
+    assert.notEqual(record.provenance, 'candidate', 'files are never mere mentions');
     if (record.group === 'project') {
       assert.ok(!record.host, 'a remote file is never a project file');
       assert.ok(!/\.log$/.test(record.path), 'logs belong to the log group');
@@ -432,4 +435,24 @@ test('stats.errors matches the error ledger exactly', async (t) => {
     assert.equal(overview.stats.commands, commandLedger(session).length, `${provider} command counts disagree`);
   }
   t.diagnostic('checked every provider with a local session');
+});
+
+test('provenance is assigned by rule, never by guess', async (t) => {
+  const session = await newestOf('claude');
+  if (!session) return t.skip('no local claude sessions');
+
+  // Files come from actions only; anchors are the place for mentions.
+  for (const record of fileLedger(session)) {
+    assert.ok(['observed', 'derived'].includes(record.provenance));
+    if (record.provenance === 'observed') assert.match(record.extractor, /^(tool|patch|item):/);
+    if (record.provenance === 'derived') assert.match(record.extractor, /^shell:/);
+  }
+  const overview = buildOverview(session);
+  for (const anchor of overview.anchors.paths) {
+    assert.equal(anchor.provenance, 'candidate', 'a path seen in text is only a candidate');
+  }
+  for (const job of jobLedger(session)) {
+    assert.ok(['observed', 'derived'].includes(job.provenance));
+    assert.ok(job.extractor.length > 0);
+  }
 });

@@ -11,8 +11,10 @@ export type {
   TokenUsage,
   AsyncJob,
   CommandRecord,
+  FactSource,
   FileGroup,
   FileRecord,
+  Provenance,
   JobStatus,
   TurnDetail,
   TurnStatus,
@@ -56,11 +58,12 @@ export {
 } from './ledger.js';
 export { eventDetail, summarizeTurns, turnDetail, type EventDetail } from './turns.js';
 export {
+  analyzableCommand,
   fileWrites,
   rawCommand,
+  stripHeredocs,
   resolveWritePath,
   type FileWrite,
-  type WriteConfidence,
 } from './writes.js';
 export {
   searchSessions,

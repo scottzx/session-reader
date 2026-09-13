@@ -10,7 +10,6 @@ import type {
   FileRecord,
   JobStatus,
   NormalizedSession,
-  TurnEvent,
 } from './types.js';
 
 const SSH_HOST = /\b[\w.-]+@((?:\d{1,3}(?:\.\d{1,3}){3})|(?:[\w-]+(?:\.[\w-]+)+))/;
@@ -58,7 +57,8 @@ export function commandLedger(session: NormalizedSession): CommandRecord[] {
       eventIndex: event.index,
       turn: toTurn(event.index),
       command: oneLine(command, 300),
-      source: 'parsed',
+      provenance: 'derived',
+      extractor: 'pair:tool_call+tool_result',
       ...(host ? { host } : {}),
       ...(event.timestamp ? { timestamp: event.timestamp } : {}),
       // An explicit status wins; otherwise "provider did not flag an error"
@@ -106,6 +106,8 @@ export function jobLedger(session: NormalizedSession): AsyncJob[] {
       id: task.id,
       ...(task.title ? { command: task.title } : {}),
       ...(task.log ? { log: task.log } : {}),
+      provenance: 'observed',
+      extractor: 'receipt:messages',
       status: task.finished ? 'completed' : 'unknown',
       evidence: task.finished ? ['provider 有完成回执'] : ['provider 记录了任务，但没有完成回执'],
     });
@@ -126,6 +128,8 @@ export function jobLedger(session: NormalizedSession): AsyncJob[] {
       ...(host ? { host } : {}),
       ...(event.timestamp ? { startedAt: event.timestamp } : {}),
       discoveredFrom: event.index,
+      provenance: 'derived',
+      extractor: 'shell:background-launch',
       // No receipt, no claim: we only saw it start.
       status: 'unknown',
       evidence: [`事件 #${event.index} 启动了后台进程，会话内未见结束证据`],
@@ -167,23 +171,22 @@ export function fileLedger(session: NormalizedSession): FileRecord[] {
   const workspace = session.ref.workspace;
   const records = new Map<string, FileRecord>();
 
-  const add = (event: TurnEvent, filePath: string, operation: string, confidence: FileRecord['confidence'], host?: string) => {
-    const key = `${host ?? ''}|${filePath}`;
-    if (records.has(key)) return;
-    records.set(key, {
-      path: filePath,
-      ...(host ? { host } : {}),
-      operation,
-      turn: toTurn(event.index),
-      ...(event.timestamp ? { timestamp: event.timestamp } : {}),
-      confidence,
-      group: groupOf(filePath, host, workspace),
-    });
-  };
-
   for (const event of session.turns) {
     for (const write of fileWrites(event)) {
-      add(event, write.host ? write.path : resolveWritePath(write, workspace), write.via, write.confidence, write.host);
+      const filePath = write.host ? write.path : resolveWritePath(write, workspace);
+      const key = `${write.host ?? ''}|${filePath}`;
+      if (records.has(key)) continue;
+      records.set(key, {
+        path: filePath,
+        ...(write.host ? { host: write.host } : {}),
+        operation: write.extractor.split(':').pop() ?? write.extractor,
+        turn: toTurn(event.index),
+        eventIndex: event.index,
+        ...(event.timestamp ? { timestamp: event.timestamp } : {}),
+        provenance: write.provenance,
+        extractor: write.extractor,
+        group: groupOf(filePath, write.host, workspace),
+      });
     }
   }
   for (const change of session.stats.fileChanges) {
@@ -193,7 +196,9 @@ export function fileLedger(session: NormalizedSession): FileRecord[] {
       path: change.path,
       operation: change.change,
       turn: 0,
-      confidence: 'explicit',
+      eventIndex: -1,
+      provenance: 'observed',
+      extractor: 'item:FileChange',
       group: groupOf(change.path, undefined, workspace),
     });
   }

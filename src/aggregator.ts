@@ -98,7 +98,7 @@ function renderMarkdown(
     const files = Object.entries(fileAttribution).sort((a, b) => b[1].length - a[1].length);
     for (const [file, touches] of files.slice(0, 40)) {
       const chain = [...new Set(touches.map((t) => t.provider))].join(' → ');
-      const inferred = touches.every((t) => t.confidence === 'inferred') ? ' ~推断' : '';
+      const inferred = touches.every((t) => t.provenance === 'derived') ? ' ~推断' : '';
       lines.push(`- \`${file}\` — ${chain}（${touches.length} 次改动${inferred}）`);
     }
     if (!files.length) lines.push('- （无文件改动记录）');
@@ -149,7 +149,7 @@ export async function aggregateWorkspaceSessions(
           sessionId: session.ref.id,
           timestamp: turn.timestamp,
           toolName: turn.toolName,
-          confidence: write.confidence,
+          provenance: write.provenance,
           ...(write.host ? { host: write.host } : {}),
         });
       }

@@ -1,16 +1,16 @@
 import path from 'node:path';
 import { canonicalizePath } from './util/paths.js';
-import type { TurnEvent } from './types.js';
-
-export type WriteConfidence = 'explicit' | 'inferred';
+import type { Provenance, TurnEvent } from './types.js';
 
 export interface FileWrite {
   path: string;
-  confidence: WriteConfidence;
-  /** Tool name for explicit writes, shell operator for inferred ones. */
-  via: string;
+  /** `observed` from a dedicated edit tool, `derived` from a shell command. */
+  provenance: Provenance;
+  /** The rule that produced it: `tool:Write`, `shell:redirect`, … */
+  extractor: string;
   /** Set when the write happened inside `ssh user@host '…'`. */
   host?: string;
+  event?: number;
 }
 
 const EDIT_TOOLS = new Set([
@@ -50,11 +50,11 @@ export function stripHeredocs(command: string): string {
 const SSH_HOST = /\b(?:ssh|scp|rsync)\b[^\n;|]*?\b[\w.-]+@([\w.-]+)/;
 
 /** Shell constructs that create or overwrite a file, in order of specificity. */
-const SHELL_PATTERNS: { via: string; re: RegExp; group?: number }[] = [
+const SHELL_PATTERNS: { via: string; re: RegExp }[] = [
   { via: 'tee', re: /\btee\s+(?:-a\s+)?(?:'([^']+)'|"([^"]+)"|([^\s'";|&)]+))/g },
-  { via: 'sed -i', re: /\bsed\b[^\n;|]*?\s-i(?:\.\w+)?\s[^\n;|]*?\s(?:'([^']+)'|"([^"]+)"|([^\s'";|&)]+))\s*(?=$|[;|&\n'"])/g },
-  { via: 'write_text', re: /(?:'([^']+)'|"([^"]+)")\s*\)?\s*\.write_text\(/g },
-  { via: 'open(w)', re: /\bopen\(\s*(?:'([^']+)'|"([^"]+)")\s*,\s*['"][wa]/g },
+  { via: 'sed-i', re: /\bsed\b[^\n;|]*?\s-i(?:\.\w+)?\s[^\n;|]*?\s(?:'([^']+)'|"([^"]+)"|([^\s'";|&)]+))\s*(?=$|[;|&\n'"])/g },
+  { via: 'write-text', re: /(?:'([^']+)'|"([^"]+)")\s*\)?\s*\.write_text\(/g },
+  { via: 'open-w', re: /\bopen\(\s*(?:'([^']+)'|"([^"]+)")\s*,\s*['"][wa]/g },
   // `=>` and `>=` are code, not redirection.
   { via: 'redirect', re: /(?<![0-9&=<>])>>?\s*(?:'([^']+)'|"([^"]+)"|([^\s'";|&<>)]+))/g },
 ];
@@ -146,13 +146,23 @@ export function fileWrites(turn: TurnEvent): FileWrite[] {
     for (const key of FILE_ARGS) {
       const value = args[key];
       if (typeof value === 'string' && value.trim()) {
-        found.push({ path: absolutize(value), confidence: 'explicit', via: turn.toolName! });
+        found.push({
+          path: absolutize(value),
+          provenance: 'observed',
+          extractor: `tool:${turn.toolName}`,
+          event: turn.index,
+        });
       }
     }
     const patch = typeof args.input === 'string' ? args.input : '';
     for (const match of patch.matchAll(PATCH_FILE)) {
       if (match[1]) {
-        found.push({ path: absolutize(match[1].trim()), confidence: 'explicit', via: 'apply_patch' });
+        found.push({
+          path: absolutize(match[1].trim()),
+          provenance: 'observed',
+          extractor: 'patch:apply_patch',
+          event: turn.index,
+        });
       }
     }
   }
@@ -168,8 +178,10 @@ export function fileWrites(turn: TurnEvent): FileWrite[] {
       // relative ones belong to the session's workspace — not to our cwd.
       found.push({
         path: viaHost ? candidate : absolutize(candidate),
-        confidence: 'inferred',
-        via,
+        // A shell write is a real action we saw run, just not a typed field.
+        provenance: 'derived',
+        extractor: `shell:${via}`,
+        event: turn.index,
         ...(viaHost ? { host: viaHost } : {}),
       });
     };

@@ -142,6 +142,27 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 
 所以 overview 回答的是"**最后一条成功命令是什么**"，而不是"当前阻塞是什么"；给出"末态事实"而不是"进度判断"。语义层留白处会显式写明 `属语义层，本阶段不生成`，不假装。
 
+### 三级溯源（provenance）
+
+每条事实都带 `provenance` 与 `extractor`，回答"你为什么认为这是事实、来自哪个事件、用什么规则提取"：
+
+| 级别 | 含义 | extractor 例子 |
+| --- | --- | --- |
+| `observed` | provider 自己记的结构化字段 | `tool:Write`、`item:FileChange`、`item:CommandExecution`、`receipt:messages` |
+| `derived` | 对**确实执行过的动作**施加确定性规则 | `shell:redirect`、`shell:scp`、`pair:tool_call+tool_result` |
+| `candidate` | 仅在文本里被提到，没有任何人动过它 | `text:path-mention`（只出现在「资源」一段） |
+
+```bash
+1session files 3ab9fe0e --group project
+```
+
+```text
+[project] derived   T1 src/types.ts　`shell:redirect E42`
+[project] observed  T7 src/ledger.ts　`tool:Write E421`
+```
+
+**文件账本永远不含 `candidate`**——路径只有在证明发生过写操作后才会进来。「资源」一段是唯一收纳 candidate 的地方，标题里写明了。
+
 **先证明发生了文件操作，再抽路径**——而不是看到像路径的字符串就当成文件。具体地：here-doc 的正文（正在被写入的数据）在分析前会被剥离，否则里面的源码会伪装成命令——`(a, b) => b[1].length` 里的 `>` 会被当成重定向，payload 里的 `ssh admin@1.2.3.4` 会被当成真连过的主机。裸 token 还必须带真实扩展名，否则 `r.source`、`a.name` 都会被当成文件。
 
 每条事实后面带 **Evidence Handle**（`E<事件号> · T<轮次>`），可以直接下钻验证：

@@ -80,6 +80,8 @@ function collectAnchors(
         kind,
         firstTurn: seen.firstTurn,
         lastTurn: seen.lastTurn,
+        // Anchors are mentions in text; nobody was seen acting on them.
+        provenance: 'candidate' as const,
       }));
 
   return {
@@ -154,7 +156,7 @@ function buildStats(session: NormalizedSession, writes: FileWrite[], turnCount: 
     events,
     filesChanged: providerFiles.size || writes.length,
     fileChangeEvents: provider.fileChanges.length || writes.length,
-    fileChangeSource: providerFiles.size ? 'provider' : 'inferred',
+    fileChangeSource: providerFiles.size ? 'observed' : 'derived',
     commands: commands.length,
     // One definition of "failed", shared with `1session errors`.
     errors: errorLedger(session).length,
@@ -241,7 +243,7 @@ function render(
     '| 轮次 | 事件 | 文件 | 命令 | 失败 | 提交 | 产物 | 上传 | 作业 |',
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     `| ${stats.turns} | ${Object.values(stats.events).reduce((a, b) => a + b, 0)} | ` +
-      `${stats.filesChanged}（${stats.fileChangeEvents} 次${stats.fileChangeSource === 'inferred' ? '·推断' : ''}） | ` +
+      `${stats.filesChanged}（${stats.fileChangeEvents} 次${stats.fileChangeSource === 'derived' ? '·派生' : ''}） | ` +
       `${stats.commands} | ${stats.errors} | ${stats.commits.length} | ${stats.artifacts.length} | ` +
       `${stats.uploads.length} | ${stats.jobs.length} |`,
     '',
@@ -274,7 +276,7 @@ function render(
   }
 
   lines.push(
-    '## 资源',
+    '## 资源（candidate：文本中提及，非动作证据）',
     '',
     anchors.paths.length
       ? anchors.paths
@@ -388,7 +390,9 @@ export function buildOverview(session: NormalizedSession): SessionOverview {
   }
   for (const change of session.stats.fileChanges) {
     const key = `|${change.path}`;
-    if (!writeMap.has(key)) writeMap.set(key, { path: change.path, confidence: 'explicit', via: change.change });
+    if (!writeMap.has(key)) {
+      writeMap.set(key, { path: change.path, provenance: 'observed', extractor: 'item:FileChange' });
+    }
   }
 
   const userTurns = session.turns.filter((turn) => turn.kind === 'user' && turn.text?.trim());

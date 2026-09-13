@@ -52,6 +52,24 @@ export interface SessionArtifact {
   updatedAt?: string;
 }
 
+/**
+ * How much a fact is worth trusting.
+ * - `observed`  — the provider recorded it as a structured field of its own.
+ * - `derived`   — a deterministic rule over an action that provably ran.
+ * - `candidate` — merely mentioned in text; nobody was seen acting on it.
+ */
+export type Provenance = 'observed' | 'derived' | 'candidate';
+
+/** Answers "why do you believe this?" for a single extracted fact. */
+export interface FactSource {
+  provenance: Provenance;
+  /** The rule that produced it, e.g. `tool:Write`, `shell:redirect`. */
+  extractor: string;
+  /** Event index it was extracted from. */
+  event?: number;
+  turn?: number;
+}
+
 export interface FileChange {
   path: string;
   change: 'add' | 'update' | 'delete';
@@ -97,8 +115,8 @@ export interface CommandRecord {
   pid?: string;
   stderr?: string;
   timestamp?: string;
-  /** Where the facts came from: the provider's own record, or our parsing. */
-  source: 'provider' | 'parsed';
+  provenance: Provenance;
+  extractor: string;
   /** Errors only: a later command with the same prefix exited zero. */
   laterSucceeded?: boolean;
 }
@@ -113,6 +131,8 @@ export interface AsyncJob {
   log?: string;
   startedAt?: string;
   discoveredFrom?: number;
+  provenance: Provenance;
+  extractor: string;
   status: JobStatus;
   /** Why we claim that status. Never empty for anything but `unknown`. */
   evidence: string[];
@@ -125,8 +145,10 @@ export interface FileRecord {
   host?: string;
   operation: string;
   turn: number;
+  eventIndex: number;
   timestamp?: string;
-  confidence: 'explicit' | 'inferred';
+  provenance: Provenance;
+  extractor: string;
   group: FileGroup;
 }
 
@@ -199,8 +221,7 @@ export interface FileTouch {
   sessionId: string;
   timestamp?: string;
   toolName?: string;
-  /** `inferred` writes were parsed out of a shell command, not a dedicated edit tool. */
-  confidence?: 'explicit' | 'inferred';
+  provenance?: Provenance;
   /** Remote host, when the file was written over ssh/scp. */
   host?: string;
 }
@@ -228,7 +249,7 @@ export interface SessionStats {
   filesChanged: number;
   /** Individual change records — a file edited three times counts three. */
   fileChangeEvents: number;
-  fileChangeSource: 'provider' | 'inferred';
+  fileChangeSource: Provenance;
   commands: number;
   errors: number;
   commits: GitCommit[];
@@ -259,10 +280,20 @@ export interface SessionOverview {
   pastes: number;
   anchors: {
     hosts: string[];
-    /** `firstTurn`/`lastTurn` express recency — not a semantic role. */
-    paths: { path: string; hits: number; kind: 'dir' | 'file'; firstTurn: number; lastTurn: number }[];
+    /**
+     * Paths merely mentioned in text — always `candidate`, never proof that
+     * anything acted on them. `firstTurn`/`lastTurn` express recency only.
+     */
+    paths: {
+      path: string;
+      hits: number;
+      kind: 'dir' | 'file';
+      firstTurn: number;
+      lastTurn: number;
+      provenance: Provenance;
+    }[];
   };
-  writes: { path: string; confidence: 'explicit' | 'inferred'; via: string; host?: string }[];
+  writes: { path: string; provenance: Provenance; extractor: string; host?: string; event?: number }[];
   pitfalls: string[];
   lastWord: string;
   markdown: string;

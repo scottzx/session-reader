@@ -145,6 +145,7 @@ async function main(): Promise<void> {
                   `[${job.status}] ${job.log ?? job.id}${job.pid ? ` pid ${job.pid}` : ''}` +
                   `${job.host ? ` @${job.host}` : ''}` +
                   `${job.startedAt ? `  ${job.startedAt.slice(0, 19)}` : ''}` +
+                  `  [${job.provenance} · ${job.extractor}]` +
                   `\n    ${job.evidence.join('；')}` +
                   `${job.command ? `\n    ${oneLine(job.command, 150)}` : ''}`,
               )
@@ -168,7 +169,7 @@ async function main(): Promise<void> {
         json,
         records,
         [
-          `${records.length} 条命令（来源：${[...new Set(records.map((r) => r.source))].join('/') || '-'}）`,
+          `${records.length} 条命令（来源：${[...new Set(records.map((r) => `${r.provenance}/${r.extractor}`))].join('  ') || '-'}）`,
           '',
           ...records.map(
             (record) =>
@@ -196,8 +197,8 @@ async function main(): Promise<void> {
           '',
           ...records.map(
             (record) =>
-              `[${record.group}] T${record.turn} ${displayPath(record, session.ref.workspace)}` +
-              `${record.confidence === 'inferred' ? ` ~${record.operation}` : ''}`,
+              `[${record.group}] ${record.provenance.padEnd(9)} T${record.turn} ` +
+              `${displayPath(record, session.ref.workspace)}　\`${record.extractor}${record.eventIndex >= 0 ? ` E${record.eventIndex}` : ''}\``,
           ),
         ].join('\n'),
       );

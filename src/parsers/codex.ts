@@ -122,7 +122,8 @@ function absorbEvent(line: Line, stats: ProviderStats, tokens: TokenUsage): void
         eventIndex: -1, // filled in by the ledger, which knows the event stream
         turn: 0,
         command,
-        source: 'provider',
+        provenance: 'observed',
+        extractor: 'item:CommandExecution',
         ...(item.process_id ? { pid: item.process_id } : {}),
         ...(item.cwd ? { cwd: canonicalizePath(item.cwd) } : {}),
         ...(typeof item.exit_code === 'number' ? { exitCode: item.exit_code } : {}),
