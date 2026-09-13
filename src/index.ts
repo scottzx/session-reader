@@ -28,6 +28,21 @@ export {
 
 export { distillSession, editedFiles, shellCommand } from './distiller.js';
 export {
+  buildHandoff,
+  type HandoffAnchor,
+  type HandoffBrief,
+  type HandoffCorrection,
+  type HandoffOptions,
+  type OpenThread,
+} from './handoff.js';
+export {
+  fileWrites,
+  rawCommand,
+  resolveWritePath,
+  type FileWrite,
+  type WriteConfidence,
+} from './writes.js';
+export {
   searchSessions,
   type SearchHit,
   type SearchMatch,

@@ -179,7 +179,11 @@ export const codexAdapter: ProviderAdapter = {
           push({
             kind: 'tool_result',
             toolResult: output,
-            isError: /"exit_code":\s*[1-9]|\berror\b/i.test(output.slice(0, 300)),
+            // A bare "error" substring matches ordinary prose; require a real
+            // non-zero exit or a fatal marker at the start of a line.
+            isError:
+              /"exit_code":\s*[1-9]/.test(output.slice(0, 400)) ||
+              /^(?:Traceback|fatal:|error:|[\w.]+Error:)/im.test(output.slice(0, 400)),
             timestamp,
           });
           break;

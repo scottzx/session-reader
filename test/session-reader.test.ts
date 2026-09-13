@@ -6,10 +6,13 @@ import { antigravityAdapter } from '../src/parsers/antigravity.js';
 import { claudeAdapter } from '../src/parsers/claude.js';
 import { codexAdapter } from '../src/parsers/codex.js';
 import type { ProviderAdapter } from '../src/parsers/provider.js';
+import type { TurnEvent } from '../src/types.js';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { listRecentSessions, parseSince, resolveSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
+import { buildHandoff } from '../src/handoff.js';
+import { fileWrites, resolveWritePath } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
 
@@ -157,4 +160,71 @@ test('searchSessions honours the kind filter and regex mode', async (t) => {
       assert.ok(match.toolName, 'tool call matches carry a tool name');
     }
   }
+});
+
+const shellTurn = (command: string): TurnEvent => ({
+  id: 't',
+  index: 0,
+  kind: 'tool_call',
+  toolName: 'run_command',
+  toolArgs: { CommandLine: command },
+});
+
+test('fileWrites picks up writes made through the shell', () => {
+  const paths = (command: string) =>
+    fileWrites(shellTurn(command)).map((write) => resolveWritePath(write, '/ws'));
+
+  assert.deepEqual(paths('echo hi > /tmp/out.txt'), ['/tmp/out.txt']);
+  assert.deepEqual(paths('cmd 2>&1 | tee -a /var/log/run.log'), ['/var/log/run.log']);
+  assert.deepEqual(paths('sed -i.bak "s/a/b/" docs/README.md'), ['/ws/docs/README.md']);
+  assert.deepEqual(paths("python3 -c \"Path('/tmp/x.json').write_text(s)\""), ['/tmp/x.json']);
+});
+
+test('fileWrites ignores devices, descriptors and directory creation', () => {
+  for (const command of [
+    'ls -la 2>/dev/null || true',
+    'rg --files > /dev/null',
+    'cmd 2>&1 | grep x',
+    'mkdir -p /tmp/d && touch /tmp/d/x',
+  ]) {
+    assert.deepEqual(fileWrites(shellTurn(command)), [], `should not report a write: ${command}`);
+  }
+});
+
+test('fileWrites attributes remote writes to the ssh host, in the right direction', () => {
+  const one = (command: string) => {
+    const writes = fileWrites(shellTurn(command));
+    assert.equal(writes.length, 1, command);
+    return writes[0]!;
+  };
+
+  const inSsh = one("ssh admin@1.2.3.4 'echo x > /home/admin/f'");
+  assert.equal(inSsh.host, '1.2.3.4');
+  assert.equal(resolveWritePath(inSsh, '/ws'), '1.2.3.4:/home/admin/f');
+
+  // `scp remote:src local_dst` lands locally — the host on the line is the source.
+  const pulled = one('scp admin@1.2.3.4:/home/admin/out.png /tmp/local.png');
+  assert.equal(pulled.host, undefined);
+  assert.equal(resolveWritePath(pulled, '/ws'), '/tmp/local.png');
+
+  const pushed = one('scp local.sh admin@1.2.3.4:/home/admin/');
+  assert.equal(pushed.host, '1.2.3.4');
+});
+
+test('buildHandoff extracts takeover state from a real session', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref) return t.skip('no local sessions');
+  const resolved = await resolveSession(ref.id);
+  assert.ok(resolved);
+  const brief = buildHandoff(await resolved.adapter.parse(resolved.candidate));
+
+  assert.equal(brief.session.id, ref.id);
+  assert.ok(brief.markdown.includes('## 目标'));
+  assert.ok(brief.markdown.includes('## 状态锚点'));
+  assert.ok(
+    brief.goal || brief.anchors.paths.length || brief.writes.length,
+    'a session should yield at least a goal, an anchor or a write',
+  );
+  for (const anchor of brief.anchors.paths) assert.ok(anchor.hits > 0);
+  for (const thread of brief.openThreads) assert.ok(thread.command.length > 0);
 });

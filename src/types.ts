@@ -74,6 +74,10 @@ export interface FileTouch {
   sessionId: string;
   timestamp?: string;
   toolName?: string;
+  /** `inferred` writes were parsed out of a shell command, not a dedicated edit tool. */
+  confidence?: 'explicit' | 'inferred';
+  /** Remote host, when the file was written over ssh/scp. */
+  host?: string;
 }
 
 export interface WorkspaceDigest {

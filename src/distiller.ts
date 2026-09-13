@@ -1,6 +1,7 @@
 import path from 'node:path';
-import { canonicalizePath, isInside } from './util/paths.js';
+import { isInside } from './util/paths.js';
 import { clip, oneLine } from './util/text.js';
+import { fileWrites, rawCommand, resolveWritePath } from './writes.js';
 import type {
   DigestFocus,
   NormalizedSession,
@@ -9,50 +10,14 @@ import type {
   TurningPoint,
 } from './types.js';
 
-const EDIT_TOOLS = new Set([
-  'write',
-  'edit',
-  'multiedit',
-  'notebookedit',
-  'write_to_file',
-  'replace_file_content',
-  'edit_file',
-  'create_file',
-  'apply_patch',
-  'str_replace_editor',
-]);
-const SHELL_TOOLS = new Set(['bash', 'run_command', 'shell', 'exec', 'local_shell', 'execute_command']);
-const FILE_ARGS = ['file_path', 'filePath', 'notebook_path', 'TargetFile', 'AbsolutePath', 'path'];
-const COMMAND_ARGS = ['command', 'CommandLine', 'cmd', 'input'];
-const PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm;
-
-const toolNameOf = (turn: TurnEvent): string => (turn.toolName ?? '').toLowerCase();
-
-/** Absolute paths a single tool call wrote to. */
-export function editedFiles(turn: TurnEvent): string[] {
-  if (turn.kind !== 'tool_call' || !EDIT_TOOLS.has(toolNameOf(turn))) return [];
-  const args = turn.toolArgs ?? {};
-  const files: string[] = [];
-  for (const key of FILE_ARGS) {
-    const value = args[key];
-    if (typeof value === 'string' && value.trim()) files.push(canonicalizePath(value));
-  }
-  const patch = typeof args.input === 'string' ? args.input : '';
-  for (const match of patch.matchAll(PATCH_FILE)) {
-    if (match[1]) files.push(canonicalizePath(match[1].trim()));
-  }
-  return files;
+/** Paths a tool call wrote to, including files written through the shell. */
+export function editedFiles(turn: TurnEvent, workspace?: string): string[] {
+  return fileWrites(turn).map((write) => resolveWritePath(write, workspace));
 }
 
 export function shellCommand(turn: TurnEvent): string | undefined {
-  if (turn.kind !== 'tool_call' || !SHELL_TOOLS.has(toolNameOf(turn))) return undefined;
-  const args = turn.toolArgs ?? {};
-  for (const key of COMMAND_ARGS) {
-    const value = args[key];
-    if (typeof value === 'string' && value.trim()) return oneLine(value, 200);
-    if (Array.isArray(value) && value.length) return oneLine(value.join(' '), 200);
-  }
-  return undefined;
+  const command = rawCommand(turn);
+  return command ? oneLine(command, 200) : undefined;
 }
 
 function relativize(file: string, workspace: string | undefined): string {
@@ -159,7 +124,7 @@ export function distillSession(
   const commands: string[] = [];
 
   for (const turn of session.turns) {
-    for (const file of editedFiles(turn)) touched.add(relativize(file, workspace));
+    for (const file of editedFiles(turn, workspace)) touched.add(relativize(file, workspace));
     const command = shellCommand(turn);
     if (command && !commands.includes(command)) commands.push(command);
   }

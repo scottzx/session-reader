@@ -2,6 +2,7 @@
 import path from 'node:path';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
+import { buildHandoff } from '../src/handoff.js';
 import { listRecentSessions, resolveSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
 import { canonicalizePath } from '../src/util/paths.js';
@@ -13,6 +14,7 @@ const USAGE = `1session — cross-agent session Read Plane
   1session list [--limit <n>] [--workspace <path>] [--provider <name>] [--since 24h] [--json]
   1session inspect <session-id> [--json]
   1session digest <session-id> [--focus marketing|review|full] [--json]
+  1session handoff <session-id> [--anchors <n>] [--json]
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session turns <session-id> [-n <turn-index>] [--json]
   1session search <query> [--workspace path] [--since 24h] [--limit n] [--provider name]
@@ -134,6 +136,13 @@ async function main(): Promise<void> {
       const session = await load(positional[0]);
       const digest = distillSession(session, { focus: focusOf(flags.focus) });
       print(json, digest, digest.markdown);
+      break;
+    }
+
+    case 'handoff': {
+      const session = await load(positional[0]);
+      const brief = buildHandoff(session, { anchorLimit: num(flags.anchors) });
+      print(json, brief, brief.markdown);
       break;
     }
 

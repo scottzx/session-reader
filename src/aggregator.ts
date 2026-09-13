@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { editedFiles, shellCommand } from './distiller.js';
+import { shellCommand } from './distiller.js';
+import { fileWrites, resolveWritePath } from './writes.js';
 import { findResolvedByWorkspace, parseSince } from './resolver.js';
 import { canonicalizePath, isInside } from './util/paths.js';
 import { oneLine } from './util/text.js';
@@ -38,11 +39,11 @@ function significantEvents(session: NormalizedSession): UnifiedTimelineEntry[] {
       entries.push({ ...base, summary: `提出：${oneLine(turn.text, 180)}` });
       continue;
     }
-    const files = editedFiles(turn);
-    if (files.length) {
+    const writes = fileWrites(turn);
+    if (writes.length) {
       entries.push({
         ...base,
-        summary: `${turn.toolName} → ${files.map((f) => path.basename(f)).join(', ')}`,
+        summary: `${turn.toolName} → ${writes.map((w) => path.basename(w.path)).join(', ')}`,
       });
       continue;
     }
@@ -97,7 +98,8 @@ function renderMarkdown(
     const files = Object.entries(fileAttribution).sort((a, b) => b[1].length - a[1].length);
     for (const [file, touches] of files.slice(0, 40)) {
       const chain = [...new Set(touches.map((t) => t.provider))].join(' → ');
-      lines.push(`- \`${file}\` — ${chain}（${touches.length} 次改动）`);
+      const inferred = touches.every((t) => t.confidence === 'inferred') ? ' ~推断' : '';
+      lines.push(`- \`${file}\` — ${chain}（${touches.length} 次改动${inferred}）`);
     }
     if (!files.length) lines.push('- （无文件改动记录）');
     if (files.length > 40) lines.push(`- …另有 ${files.length - 40} 个文件`);
@@ -139,14 +141,16 @@ export async function aggregateWorkspaceSessions(
     let files = 0;
     for (const turn of session.turns) {
       if (shellCommand(turn)) commands++;
-      for (const file of editedFiles(turn)) {
+      for (const write of fileWrites(turn)) {
         files++;
-        const key = relativize(file, workspace);
+        const key = relativize(resolveWritePath(write, session.ref.workspace), workspace);
         (fileAttribution[key] ??= []).push({
           provider: session.ref.provider,
           sessionId: session.ref.id,
           timestamp: turn.timestamp,
           toolName: turn.toolName,
+          confidence: write.confidence,
+          ...(write.host ? { host: write.host } : {}),
         });
       }
     }
