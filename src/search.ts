@@ -1,7 +1,9 @@
 import { listResolvedSessions, type ListOptions } from './resolver.js';
-import type { SessionRef, TurnEvent, TurnKind } from './types.js';
+import type { NormalizedSession, SessionRef, TurnEvent, TurnKind } from './types.js';
 
 export interface SearchOptions extends ListOptions {
+  /** Bypass the index and parse every candidate from disk. */
+  useIndex?: boolean;
   /** Restrict to these turn kinds; defaults to all of them. */
   kinds?: TurnKind[];
   /** Treat the query as a regular expression instead of a literal. */
@@ -62,9 +64,7 @@ export async function searchSessions(query: string, options: SearchOptions = {})
   const maxPerSession = options.maxPerSession ?? DEFAULT_MAX_PER_SESSION;
 
   const hits: SearchHit[] = [];
-  for (const handle of await listResolvedSessions({ ...options, limit: options.limit ?? 30 })) {
-    const session = await handle.adapter.parse(handle.candidate).catch(() => undefined);
-    if (!session) continue;
+  for (const session of await candidates(options)) {
 
     const matches: SearchMatch[] = [];
     let totalMatches = 0;
@@ -88,5 +88,40 @@ export async function searchSessions(query: string, options: SearchOptions = {})
     }
     if (totalMatches) hits.push({ session: session.ref, matches, totalMatches });
   }
-  return hits.sort((a, b) => Date.parse(b.session.updatedAt ?? '') - Date.parse(a.session.updatedAt ?? ''));
+  return hits
+    .sort((a, b) => Date.parse(b.session.updatedAt ?? '') - Date.parse(a.session.updatedAt ?? ''))
+    .slice(0, options.limit ?? hits.length);
+}
+
+/**
+ * The sessions a search must look at.
+ *
+ * Without the index this was capped by the resolver's scan budget, so a query
+ * silently covered only the newest ~60 sessions per provider and reported the
+ * result as if it had covered everything. Going through the index removes the
+ * cap: `scan` still exists, but it now defaults to "all of them".
+ */
+async function candidates(options: SearchOptions): Promise<NormalizedSession[]> {
+  const handles = await listResolvedSessions({
+    ...options,
+    limit: Number.POSITIVE_INFINITY,
+    scan: options.scan ?? Number.POSITIVE_INFINITY,
+  });
+  if (options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1') {
+    const parsed: NormalizedSession[] = [];
+    for (const handle of handles) {
+      const session = await handle.adapter.parse(handle.candidate).catch(() => undefined);
+      if (session) parsed.push(session);
+    }
+    return parsed;
+  }
+  const { openStore } = await import('./store/db.js');
+  const { indexSession } = await import('./store/indexer.js');
+  const db = await openStore();
+  const sessions: NormalizedSession[] = [];
+  for (const handle of handles) {
+    const result = await indexSession(db, handle, { edges: false }).catch(() => undefined);
+    if (result) sessions.push(result.session);
+  }
+  return sessions;
 }

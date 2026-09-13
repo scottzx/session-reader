@@ -479,3 +479,165 @@ test('provenance is assigned by rule, never by guess', async (t) => {
     assert.ok(job.extractor.length > 0);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Index store
+// ---------------------------------------------------------------------------
+
+import fsp from 'node:fs/promises';
+import { openStore, resetStoreCache } from '../src/store/db.js';
+import { indexSession } from '../src/store/indexer.js';
+import { invocationsOf, deriveEdges, edgesOf } from '../src/store/edges.js';
+import { readSession, sessionRow } from '../src/store/read.js';
+import type { NormalizedSession } from '../src/types.js';
+
+async function tempStore() {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'session-index-'));
+  resetStoreCache();
+  const db = await openStore(path.join(dir, 'index.db'));
+  return { db, dir };
+}
+
+test('a session read back from the index equals a fresh parse', async (t) => {
+  const { db, dir } = await tempStore();
+  try {
+    let checked = 0;
+    for (const provider of ['codex', 'antigravity', 'claude'] as const) {
+      const [ref] = await listRecentSessions({ limit: 1, provider });
+      if (!ref) continue;
+      const handle = await resolveSession(ref.id);
+      if (!handle) continue;
+      const direct = await handle.adapter.parse(handle.candidate);
+      const { id } = await indexSession(db, handle);
+      const row = sessionRow(db, id)!;
+      // This is the safety net for the whole store: if these ever diverge,
+      // the index is rewriting facts rather than caching them.
+      assert.deepStrictEqual(readSession(db, row), direct, `${provider} round-trip`);
+      assert.equal(
+        buildOverview(readSession(db, row)).markdown,
+        buildOverview(direct).markdown,
+        `${provider} renders differently through the index`,
+      );
+      checked++;
+    }
+    if (!checked) return t.skip('no local sessions');
+    t.diagnostic(`round-tripped ${checked} provider(s)`);
+  } finally {
+    resetStoreCache();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unchanged fingerprint costs no re-read, --force does', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref) return t.skip('no local sessions');
+  const handle = await resolveSession(ref.id);
+  if (!handle) return t.skip('unresolvable');
+  const { db, dir } = await tempStore();
+  try {
+    assert.equal((await indexSession(db, handle)).action, 'indexed');
+    assert.equal((await indexSession(db, handle)).action, 'reused');
+    assert.equal((await indexSession(db, handle, { force: true })).action, 'indexed');
+  } finally {
+    resetStoreCache();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a new extractor version re-derives facts from stored events', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref) return t.skip('no local sessions');
+  const handle = await resolveSession(ref.id);
+  if (!handle) return t.skip('unresolvable');
+  const { db, dir } = await tempStore();
+  try {
+    const { id, session } = await indexSession(db, handle);
+    db.prepare('UPDATE sessions SET extractor_version = -1 WHERE id = ?').run(id);
+    // The source file is left alone on purpose: only the derived layer is stale.
+    assert.equal((await indexSession(db, handle)).action, 'facts-rederived');
+    const rows = db.prepare('SELECT count(*) AS c FROM file_ops WHERE session_id = ?').get(id) as {
+      c: number;
+    };
+    assert.equal(rows.c, fileLedger(session).length);
+  } finally {
+    resetStoreCache();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('here-doc payloads never become edges', () => {
+  const quoted: TurnEvent = {
+    id: 'x#0',
+    index: 0,
+    kind: 'tool_call',
+    toolName: 'Bash',
+    toolArgs: {
+      command: "cat > README.md <<'EOF'\n1session overview 3ab9fe0e\n1session handoff 01a0907c\nEOF",
+    },
+  };
+  assert.deepEqual(invocationsOf(quoted), []);
+
+  const real: TurnEvent = {
+    id: 'x#1',
+    index: 1,
+    kind: 'tool_call',
+    toolName: 'Bash',
+    toolArgs: { command: 'node dist/bin/1session.js overview 3ab9fe0e | head -5' },
+  };
+  const found = invocationsOf(real);
+  assert.equal(found.length, 1);
+  assert.equal(found[0]!.relation, 'references');
+  assert.equal(found[0]!.target, '3ab9fe0e');
+});
+
+test('verbs without a session target produce no edge', () => {
+  for (const command of ['1session list --limit 10', '1session search deployment --since 7d']) {
+    const event: TurnEvent = {
+      id: 'x#0',
+      index: 0,
+      kind: 'tool_call',
+      toolName: 'Bash',
+      toolArgs: { command },
+    };
+    assert.deepEqual(invocationsOf(event), [], command);
+  }
+});
+
+test('re-deriving edges does not inflate the evidence count', async (t) => {
+  const { db, dir } = await tempStore();
+  try {
+    const [target] = await listRecentSessions({ limit: 1, provider: 'codex' });
+    const [caller] = await listRecentSessions({ limit: 1, provider: 'claude' });
+    if (!target || !caller) return t.skip('needs a codex and a claude session');
+    for (const ref of [target, caller]) {
+      const handle = await resolveSession(ref.id);
+      if (handle) await indexSession(db, handle, { edges: false });
+    }
+    const callerId = `claude:${caller.id}`;
+    const session = readSession(db, sessionRow(db, callerId)!);
+    const synthetic: NormalizedSession = {
+      ...session,
+      turns: [
+        {
+          id: `${caller.id}#0`,
+          index: 0,
+          kind: 'tool_call',
+          toolName: 'Bash',
+          toolArgs: { command: `1session overview ${target.id}` },
+        },
+      ],
+    };
+    deriveEdges(db, callerId, synthetic);
+    const first = edgesOf(db, callerId);
+    deriveEdges(db, callerId, synthetic);
+    const second = edgesOf(db, callerId);
+    assert.equal(first.length, 1);
+    assert.deepEqual(
+      second.map((edge) => edge.evidenceCount),
+      first.map((edge) => edge.evidenceCount),
+    );
+  } finally {
+    resetStoreCache();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

@@ -16,6 +16,12 @@ export interface ProviderAdapter {
   scanRef(candidate: SessionCandidate): Promise<SessionRef>;
   /** Full parse into ordered turns. */
   parse(candidate: SessionCandidate): Promise<NormalizedSession>;
+  /**
+   * Extra identity for providers whose `parse` reads more than the transcript
+   * (antigravity also picks up artifacts next to it). Folded into the index
+   * fingerprint so those side files cannot go stale unnoticed.
+   */
+  auxFingerprint?(candidate: SessionCandidate): Promise<string | undefined>;
 }
 
 export function toolArgsOf(value: unknown): Record<string, unknown> | undefined {

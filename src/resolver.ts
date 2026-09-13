@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { antigravityAdapter } from './parsers/antigravity.js';
 import { claudeAdapter } from './parsers/claude.js';
@@ -15,6 +16,12 @@ const WORKSPACE_SCAN = 600;
 
 export interface ListOptions {
   limit?: number;
+  /**
+   * How many session files may be opened. Defaults to a small budget so an
+   * unfiltered `list` stays cheap; pass `Infinity` when completeness matters
+   * more than latency (indexing, search).
+   */
+  scan?: number;
   workspace?: string;
   provider?: AgentProvider;
   /** Only sessions updated at or after this moment (`24h`, `7d`, ISO date). */
@@ -69,7 +76,7 @@ export async function listResolvedSessions(options: ListOptions = {}): Promise<R
     if (options.provider && adapter.provider !== options.provider) continue;
     const candidates = await adapter.listCandidates();
     let scanned = 0;
-    const budget = workspace ? WORKSPACE_SCAN : DEFAULT_SCAN;
+    const budget = options.scan ?? (workspace ? WORKSPACE_SCAN : DEFAULT_SCAN);
     for (const candidate of candidates) {
       if (sinceMs && candidate.mtimeMs < sinceMs) break; // candidates are newest first
       if (scanned >= budget) break;
@@ -129,4 +136,53 @@ export async function parseSession(sessionId: string): Promise<NormalizedSession
   const resolved = await resolveSession(sessionId);
   if (!resolved) throw new Error(`session not found: ${sessionId}`);
   return resolved.adapter.parse(resolved.candidate);
+}
+
+export interface LoadOptions {
+  /** Set false to bypass the index entirely (CI, read-only checkouts). */
+  useIndex?: boolean;
+  force?: boolean;
+}
+
+/**
+ * The one seam every command loads sessions through. Whether the events come
+ * from the index or straight off disk, the object handed back is the same, so
+ * `buildOverview` / `fileLedger` / `summarizeTurns` never learn about caching.
+ */
+export async function loadSession(
+  sessionId: string,
+  options: LoadOptions = {},
+): Promise<NormalizedSession> {
+  if (options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1') {
+    return parseSession(sessionId);
+  }
+  const { openStore } = await import('./store/db.js');
+  const { findSessionRow } = await import('./store/read.js');
+  const { indexSession } = await import('./store/indexer.js');
+  const db = await openStore();
+
+  // A session the index already knows can be re-checked with a single stat,
+  // instead of walking every provider directory again.
+  const row = findSessionRow(db, sessionId);
+  const handle = (row ? await handleFromPath(row.provider, row.native_id, row.source_path) : undefined)
+    ?? (await resolveSession(sessionId));
+  if (!handle) throw new Error(`session not found: ${sessionId}`);
+  const result = await indexSession(db, handle, { ...(options.force ? { force: true } : {}) });
+  return result.session;
+}
+
+/** Rebuilds an adapter handle from an indexed row without a directory scan. */
+async function handleFromPath(
+  provider: string,
+  nativeId: string,
+  sourcePath: string,
+): Promise<{ adapter: ProviderAdapter; candidate: SessionCandidate } | undefined> {
+  const adapter = adapters.find((item) => item.provider === provider);
+  if (!adapter) return undefined;
+  const stat = await fs.stat(sourcePath).catch(() => undefined);
+  if (!stat) return undefined;
+  return {
+    adapter,
+    candidate: { id: nativeId, path: sourcePath, mtimeMs: stat.mtimeMs, sizeBytes: stat.size },
+  };
 }

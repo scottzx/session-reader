@@ -108,10 +108,11 @@ function absorbEvent(line: Line, stats: ProviderStats, tokens: TokenUsage): void
   switch (item.type) {
     case 'FileChange':
       for (const [file, detail] of Object.entries(item.changes ?? {})) {
+        const size = detail?.content?.length;
         stats.fileChanges.push({
           path: canonicalizePath(file),
           change: CHANGE_KINDS[detail?.type ?? ''] ?? 'update',
-          sizeBytes: detail?.content?.length,
+          ...(size === undefined ? {} : { sizeBytes: size }),
         });
       }
       break;

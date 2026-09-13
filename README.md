@@ -36,7 +36,11 @@ npm run build && node dist/bin/1session.js <command>
 | `1session commands <id> [--failed] [--host h] [--turn n] [--json]` | 命令账本：exit_code / 耗时 / cwd |
 | `1session files <id> [--group project\|runtime\|log\|all] [--json]` | 文件账本，按项目 / 运行态 / 日志分组 |
 | `1session errors <id> [--json]` | 失败命令，带 stderr 与"同前缀命令后续是否成功" |
-| `1session search <query> [--workspace p] [--since 24h] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段 |
+| `1session search <query> [--workspace p] [--since 24h] [--limit n] [--scan n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段 |
+| `1session index [<id>] [--all] [--force] [--since 30d]` | 建立 / 刷新索引；`--all` 全库回填 |
+| `1session graph <id> [--json]`（别名 `related`） | 会话之间的引用关系 + 每条边的证据 |
+
+全局开关 `--no-index` 绕过索引直读源文件。
 
 `<session-id>` 支持完整 id、id 前缀（≥6 位）或原始文件路径。
 
@@ -200,7 +204,7 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 - **发现是分层的**：先按文件 mtime 排序候选（只 `stat`），再按需读文件头填充元数据，最后才整篇解析。`list` 与 `workspace` 通常在 0.5 秒内返回。
 - **`--since` 的精度**：预筛用文件 mtime（可能因同步/复制而失真），`--digest` 会在整篇解析后用真实轮次时间戳再过滤一次。
 - **Claude 标题**：`list` 只读文件头，标题取首个用户请求；`inspect`/`digest`/`workspace --digest` 会整篇解析，此时优先使用会话自身的 `custom-title` / `ai-title`。
-- **`search` 会整篇解析候选会话**（匹配的是 `text` + 工具结果 + 工具参数 JSON），所以先用 `--workspace` / `--since` / `--provider` 收窄，再放大 `--limit`（默认最多扫 30 个会话）。默认每个会话最多列 5 处命中，`totalMatches` 给的是真实总数。
+- **`search` 默认覆盖全库**。它匹配 `text` + 工具结果 + 工具参数 JSON。早先它受发现层的扫描预算限制，一次查询其实只看最近 ~60 个会话／每个智能体，却把结果报告得像查全了——这是"静默不全"，比慢危险。现在走索引，`--scan` 默认无上限，`--limit` 只管返回几个会话。默认每个会话最多列 5 处命中，`totalMatches` 给的是真实总数。
 - **文件归属分两级置信度**。`explicit` 来自显式写工具（`Write`/`Edit`/`write_to_file`/`replace_file_content`/`apply_patch`）；`inferred` 是从 shell 命令里解析出来的（`>`/`>>`、`tee`、`cp`/`mv`、`scp`、`sed -i`、python 的 `write_text`/`open(w)`），在展示时标 `~`。没有它，纯靠 shell 干活的智能体（如 codex 全程走 `exec` 沙箱）会显示成"一个文件都没改过"。这是启发式，可能漏也可能多报。
 - **轮次边界按"其后最近开始的那一轮"归属**。`task_started` 总比该轮第一个事件早几秒（12:41:06 vs 12:41:13），按"落在窗口内"匹配会全部落空。
 - **统计优先用各家自己记的结构化数据，而不是我们推断**。codex 的 `event_msg/item_completed` 里有 `FileChange`（带 diff）、`CommandExecution`（带 pid/cwd）、`task_started/task_complete`（轮次边界 + 耗时）与 `token_usage_record`；claude 每条都带 `gitBranch`/`model`/`usage`；antigravity 的产物、上传、后台任务分别在 brain 目录、`.user_uploaded/` 与 `.system_generated/{tasks,messages}/`。统计里 `fileChangeSource` 会标明这次是 `provider` 还是 `inferred`。
@@ -209,6 +213,58 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 - **失败只有一个定义**：exit code 明确非 0，或 exit code 未知但 provider 标了错。`stats.errors` 与 `1session errors` 永远是同一个数。
 - **文件也只有一个账本**。`overview` 的统计、`overview --json` 的 `writes`、`1session files --group all` 三者行数恒等，且 `project + runtime + log` 必须刚好铺满（有测试钉住）。`filesChanged` 是去重后的文件数，`fileChangeEvents` 是写动作次数（同一文件写三次算三次），两者定义不同所以可以不等。混合账本不给单一来源标签，而是给 `observed / derived` 的分项计数。
 - **远程写会带 host**。命令形如 `ssh user@host '…'` 时，其中的写标记为 `host:/path`；但 `scp remote:src local_dst` 是往本地写，host 只认目标端自己写明的那个。
+
+## 索引：把事实存下来，而不是每次重推
+
+`~/.1agents/session-reader/index.db`（SQLite，`SESSION_READER_DB` 可改）。任何命令碰到一个会话都会顺手索引它；`1session index --all` 做全库回填。
+
+```
+L0  各家原始 JSONL                        ← 永远是唯一真相
+L1  归一事件  sessions / events
+L2  确定性事实  file_ops / commands / jobs
+L3  会话关系  session_edges / edge_evidence
+```
+
+**四个版本号各管一层**（`src/store/schema.ts`），这是分层的实际收益：
+
+| 变了什么 | 代价 |
+| --- | --- |
+| 源文件指纹 或 `PARSER_VERSION` | 重读文件，L1/L2/L3 全部重建 |
+| `EXTRACTOR_VERSION` | **一个字节的 JSONL 都不读**，从 `events` 行重新推导 L2 |
+| `EDGE_VERSION` | 同上，只重推 L3 |
+| `SCHEMA_VERSION` | 删库重建（L0 能重建全部，不写迁移代码） |
+
+指纹 = 大小 + mtime + 文件头 64KB 的 sha256。没有"会话是否结束"这个概念——指纹没变就是没变。
+
+**事件文本整条存，不截断**。曾经按 128KB 封顶，实测代价是全库 622 个会话里只有 7 个事件超限、省下 0.08% 的体积，却让 `search` 漏掉长构建日志里的命中（`--deployment-target` 正好落在切口之后）——用 0.08% 换一个"看起来查全了其实没有"的答案，方向反了。本机实测：622 个会话首次回填 7.5s，索引 304MB。
+
+**索引只许加速事实，不许改动事实**。测试里钉着一条往返等价：三个 provider 各取一个真实会话，`parse()` 的结果与索引读回的结果必须 `deepStrictEqual`，`buildOverview` 的 markdown 也必须逐字相同。命令行上随时可复核：
+
+```bash
+diff <(1session overview <id>) <(1session overview <id> --no-index)
+```
+
+### 会话关系图（L3）
+
+边从真实工具调用里长出来，不猜。B 跑了 `1session overview A`，就记一条 `B --references--> A`：
+
+```
+$ 1session graph ca8325e1
+  → references    claude:3ab9fe0e…　证据 9 次（overview turns overview files files …）
+  → references    codex:01a0907c…　证据 2 次（overview overview）
+```
+
+关系表一条、证据表多条，所以能区分"瞥了一眼"和"全程在消费"。规范方向只存 `from=调用方`，反向由展示层翻成 `referenced_by`。
+
+三条硬约束：
+
+- **here-doc 正文先剥掉**（复用 `writes.ts` 的 `stripHeredocs`）。文档里写着 `1session overview xxx` 的代码块不是调用，把它算成边就会凭空造出关系——这和早先把 here-doc 里的 `r.source`、`1.2.3.4` 当成真实文件和主机是同一个坑。
+- **目标必须能解析成已索引的会话**，否则不落边。悬空边比没有边更糟。
+- **幂等**：重新索引不会让证据计数膨胀（计数是数出来的，不是累加的）。
+
+本期只实装 `references` 与 `handoff_from`；`forked_from` / `resumed_from` / `sends_to` 在类型里预留但从不猜测。
+
+运行时捕获：若环境注入了 `SESSION_READER_CALLER_SESSION`，调用当下就直接落边（`observed / runtime:caller-env`），无需事后从历史里恢复。
 
 ## 测试
 

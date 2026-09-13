@@ -59,8 +59,9 @@ async function readTasks(systemDir: string): Promise<BackgroundTask[]> {
     if (!notice?.sender) continue;
     const id = notice.sender.split('/').pop() ?? notice.sender;
     const existing = tasks.get(id) ?? { id, finished: false };
+    const title = notice.renderDetails?.messageTitle;
     // A notice only exists once the job has reported back.
-    tasks.set(id, { ...existing, finished: true, title: notice.renderDetails?.messageTitle });
+    tasks.set(id, { ...existing, finished: true, ...(title === undefined ? {} : { title }) });
   }
   return [...tasks.values()];
 }
@@ -72,7 +73,11 @@ async function readUploads(sessionDir: string): Promise<ProviderStats['uploads']
     for (const name of await fs.readdir(full).catch(() => [] as string[])) {
       if (name.startsWith('.')) continue;
       const stat = await fs.stat(path.join(full, name)).catch(() => undefined);
-      uploads.push({ name, path: path.join(full, name), sizeBytes: stat?.size });
+      uploads.push({
+        name,
+        path: path.join(full, name),
+        ...(stat ? { sizeBytes: stat.size } : {}),
+      });
     }
   }
   return uploads;
@@ -204,6 +209,26 @@ export const antigravityAdapter: ProviderAdapter = {
       updatedAt: new Date(candidate.mtimeMs).toISOString(),
       sizeBytes: candidate.sizeBytes,
     };
+  },
+
+  /**
+   * `parse` also reads the artifacts sitting next to the transcript, so the
+   * transcript's own size and mtime are not the whole identity.
+   */
+  async auxFingerprint(candidate: SessionCandidate): Promise<string | undefined> {
+    const dir = path.dirname(path.dirname(path.dirname(candidate.path)));
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => undefined);
+    if (!entries) return undefined;
+    let newest = 0;
+    let count = 0;
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const stat = await fs.stat(path.join(dir, entry.name)).catch(() => undefined);
+      if (!stat) continue;
+      count++;
+      newest = Math.max(newest, Math.round(stat.mtimeMs));
+    }
+    return `${count}:${newest}`;
   },
 
   async parse(candidate: SessionCandidate): Promise<NormalizedSession> {

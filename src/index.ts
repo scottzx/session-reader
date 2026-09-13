@@ -35,6 +35,8 @@ export type {
 export {
   adapters,
   findResolvedByWorkspace,
+  loadSession,
+  type LoadOptions,
   findSessionsByWorkspace,
   listRecentSessions,
   listResolvedSessions,
@@ -74,3 +76,22 @@ export {
 export { aggregateWorkspaceSessions, type AggregateOptions } from './aggregator.js';
 export type { ProviderAdapter, SessionCandidate } from './parsers/provider.js';
 export { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
+export { defaultDbPath, openStore, resetStoreCache } from './store/db.js';
+export { indexSession, type IndexAction, type IndexOptions, type IndexResult } from './store/indexer.js';
+export { findSessionRow, readSession, sessionRow, type SessionRow } from './store/read.js';
+export {
+  captureRuntimeEdge,
+  deriveEdges,
+  edgeEvidence,
+  edgesOf,
+  invocationsOf,
+  type EdgeRelation,
+  type EdgeView,
+} from './store/edges.js';
+export { deriveFacts } from './store/facts.js';
+export {
+  EDGE_VERSION,
+  EXTRACTOR_VERSION,
+  PARSER_VERSION,
+  SCHEMA_VERSION,
+} from './store/schema.js';

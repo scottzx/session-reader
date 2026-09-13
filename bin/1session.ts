@@ -5,7 +5,7 @@ import { distillSession } from '../src/distiller.js';
 import { buildOverview } from '../src/overview.js';
 import { eventDetail, summarizeTurns, turnDetail } from '../src/turns.js';
 import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
-import { listRecentSessions, resolveSession } from '../src/resolver.js';
+import { listRecentSessions, loadSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
@@ -23,9 +23,13 @@ const USAGE = `1session — cross-agent session Read Plane
   1session errors <session-id> [--json]
   1session digest <session-id> [--focus marketing|review|full] [--json]
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
-  1session search <query> [--workspace path] [--since 24h] [--limit n] [--provider name]
+  1session index [<session-id>] [--all] [--force] [--since 30d]  建立/刷新索引
+  1session graph <session-id> [--json]                 会话之间的引用关系
+  1session search <query> [--workspace path] [--since 24h] [--limit n] [--scan n] [--provider name]
                           [--kind user,assistant,thinking,tool_call,tool_result]
                           [--regex] [--case] [--context n] [--max-hits n] [--json]
+
+全局：--no-index 绕过索引直读源文件。索引位于 ~/.1agents/session-reader/index.db
 
 Providers: antigravity (~/.gemini/antigravity/brain), claude (~/.claude/projects), codex (~/.codex/sessions).
 `;
@@ -35,6 +39,11 @@ interface Args {
   positional: string[];
   flags: Record<string, string | boolean>;
 }
+
+/** Flags that never take a value, so they cannot swallow a positional. */
+const BOOLEAN_FLAGS = new Set([
+  'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index',
+]);
 
 function parseArgs(argv: string[]): Args {
   const [command = 'help', ...rest] = argv;
@@ -47,7 +56,7 @@ function parseArgs(argv: string[]): Args {
     } else if (token.startsWith('--')) {
       const name = token.slice(2);
       const next = rest[i + 1];
-      if (next && !next.startsWith('--')) {
+      if (!BOOLEAN_FLAGS.has(name) && next && !next.startsWith('--')) {
         flags[name] = next;
         i++;
       } else {
@@ -92,16 +101,29 @@ function print(json: boolean, data: unknown, text: string): void {
   console.log(json ? JSON.stringify(data, null, 2) : text);
 }
 
+let useIndex = true;
+
 async function load(sessionId: string | undefined): Promise<NormalizedSession> {
   if (!sessionId) throw new Error('missing <session-id>');
-  const resolved = await resolveSession(sessionId);
-  if (!resolved) throw new Error(`session not found: ${sessionId}`);
-  return resolved.adapter.parse(resolved.candidate);
+  return loadSession(sessionId, { useIndex });
+}
+
+/**
+ * Records "this session read that one" while it is happening, when the caller
+ * identity was injected. Costs nothing and is silently skipped otherwise.
+ */
+async function noteRead(verb: string, target: string | undefined): Promise<void> {
+  if (!useIndex || !target || !process.env.SESSION_READER_CALLER_SESSION) return;
+  const { openStore } = await import('../src/store/db.js');
+  const { captureRuntimeEdge } = await import('../src/store/edges.js');
+  captureRuntimeEdge(await openStore(), verb, target);
 }
 
 async function main(): Promise<void> {
   const { command, positional, flags } = parseArgs(process.argv.slice(2));
   const json = flags.json === true;
+  useIndex = flags['no-index'] !== true;
+  await noteRead(command, positional[0]);
 
   switch (command) {
     case 'list': {
@@ -342,6 +364,8 @@ async function main(): Promise<void> {
         caseSensitive: flags.case === true,
         context: num(flags.context),
         maxPerSession: num(flags['max-hits']),
+        scan: num(flags.scan),
+        useIndex,
       });
       const total = hits.reduce((sum, hit) => sum + hit.totalMatches, 0);
       print(
@@ -365,6 +389,109 @@ async function main(): Promise<void> {
               ]),
             ].join('\n')
           : `无命中：${query}`,
+      );
+      break;
+    }
+
+    case 'index': {
+      const { openStore } = await import('../src/store/db.js');
+      const { indexSession } = await import('../src/store/indexer.js');
+      const { deriveEdges } = await import('../src/store/edges.js');
+      const { readSession, sessionRow } = await import('../src/store/read.js');
+      const { listResolvedSessions } = await import('../src/resolver.js');
+      const db = await openStore();
+      const force = flags.force === true;
+
+      if (flags.all !== true) {
+        const target = positional[0];
+        if (!target) throw new Error('missing <session-id> (or pass --all)');
+        const { resolveSession } = await import('../src/resolver.js');
+        const handle = await resolveSession(target);
+        if (!handle) throw new Error(`session not found: ${target}`);
+        const result = await indexSession(db, handle, { force });
+        print(json, result, `${result.id}  ${result.action}  ${result.session.turns.length} 个事件`);
+        break;
+      }
+
+      // Backfill indexes L1+L2 first and derives edges in a second pass, so a
+      // reference to a session that had not been indexed yet still lands.
+      const started = Date.now();
+      const handles = await listResolvedSessions({
+        limit: num(flags.limit) ?? Number.POSITIVE_INFINITY,
+        scan: num(flags.scan) ?? Number.POSITIVE_INFINITY,
+        ...(str(flags.since) ? { since: str(flags.since)! } : {}),
+        ...(str(flags.provider) ? { provider: str(flags.provider) as never } : {}),
+      });
+      const counts: Record<string, number> = {};
+      for (const handle of handles) {
+        const result = await indexSession(db, handle, { force, edges: false });
+        counts[result.action] = (counts[result.action] ?? 0) + 1;
+      }
+      let edges = 0;
+      for (const handle of handles) {
+        const id = `${handle.adapter.provider}:${handle.candidate.id}`;
+        const row = sessionRow(db, id);
+        if (row) edges += deriveEdges(db, id, readSession(db, row));
+      }
+      const summary = {
+        sessions: handles.length,
+        actions: counts,
+        edges,
+        seconds: Number(((Date.now() - started) / 1000).toFixed(1)),
+      };
+      print(
+        json,
+        summary,
+        `已索引 ${summary.sessions} 个会话，耗时 ${summary.seconds}s\n` +
+          Object.entries(counts)
+            .map(([action, n]) => `  ${action.padEnd(16)} ${n}`)
+            .join('\n') +
+          `\n  边证据             ${edges}`,
+      );
+      break;
+    }
+
+    case 'graph':
+    case 'related': {
+      // An inbound edge is the same fact read from the other end.
+      const INVERSE: Record<string, string> = {
+        references: 'referenced_by',
+        handoff_from: 'handed_off_to',
+        forked_from: 'forked_into',
+        resumed_from: 'resumed_into',
+        sends_to: 'sent_from',
+      };
+      const { openStore } = await import('../src/store/db.js');
+      const { edgeEvidence, edgesOf } = await import('../src/store/edges.js');
+      const { findSessionRow } = await import('../src/store/read.js');
+      const target = positional[0];
+      if (!target) throw new Error('missing <session-id>');
+      await load(target); // make sure it is indexed before we look it up
+      const db = await openStore();
+      const row = findSessionRow(db, target);
+      if (!row) throw new Error(`session not found: ${target}`);
+      const edges = edgesOf(db, row.id).map((edge) => ({
+        ...edge,
+        evidence: edgeEvidence(db, edge.from, edge.to, edge.relation),
+      }));
+      print(
+        json,
+        { session: row.id, edges },
+        edges.length
+          ? [
+              `${row.id}　${oneLine(row.title ?? '', 60)}`,
+              '',
+              ...edges.map((edge) =>
+                edge.direction === 'out'
+                  ? `  → ${edge.relation.padEnd(13)} ${edge.to}　证据 ${edge.evidenceCount} 次` +
+                    `（${edge.evidence.map((item) => item.operation).join(' ')}）`
+                  : `  ← ${(INVERSE[edge.relation] ?? edge.relation).padEnd(13)} ${edge.from}　证据 ${edge.evidenceCount} 次` +
+                    `（${edge.evidence.map((item) => item.operation).join(' ')}）`,
+              ),
+              '',
+              '> → 本会话查过对方；← 对方查过本会话。证据可下钻：1session turn <会话> <轮次>',
+            ].join('\n')
+          : `${row.id} 尚无关系边（没有任何会话通过 1session 查过它，它也没查过别人）`,
       );
       break;
     }
