@@ -14,6 +14,16 @@
 
 所有会话被归一为同一组 `TurnEvent`：`user` / `assistant` / `thinking` / `tool_call` / `tool_result`。
 
+## 安装
+
+```bash
+npm install @1agents/session-reader   # 作为库
+npm install -g @1agents/session-reader  # 作为 1session 命令
+npx @1agents/session-reader list      # 不安装直接用
+```
+
+要求 Node.js >= 22.5（依赖内置的 `node:sqlite`），零运行时依赖。
+
 ## CLI
 
 ```bash
@@ -324,3 +334,14 @@ $ 1session graph ca8325e1
 npm test        # node --test，针对本机真实会话文件；无对应会话时自动 skip
 npm run typecheck
 ```
+
+## 发布
+
+npm 包为 `@1agents/session-reader`，由 GitHub Actions 发布，本地不手工 `npm publish`：
+
+- `.github/workflows/ci.yml` —— push 到 `main` 与 PR 上跑 `typecheck` / `test` / `build` / `npm pack --dry-run`。
+- `.github/workflows/release.yml` —— 手动触发（Actions → Release → Run workflow），输入 `patch` / `minor` / `major` / `prerelease` 或具体版本号。流程：跑测试 → `npm version` 打版本提交与 tag → `npm publish`（带 provenance）→ 推送 commit 与 tag → 创建 GitHub Release。
+
+发布顺序是先 publish 再 push：npm 发布失败时远端不会留下悬空的版本提交和 tag，直接重跑即可。
+
+仓库需要配置 secret `NPM_TOKEN`（npm 上具备该包发布权限的 Automation token）。

@@ -2,6 +2,24 @@
   "name": "@1agents/session-reader",
   "version": "0.1.0",
   "description": "Read Plane: cross-agent session discovery, turn inspection, workspace aggregation and distillation from raw local session files.",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "antigravity",
+    "session",
+    "transcript",
+    "jsonl",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scottzx/session-reader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/scottzx/session-reader/issues"
+  },
+  "homepage": "https://github.com/scottzx/session-reader#readme",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
@@ -18,10 +36,15 @@
     "dist",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/session-reader.test.ts",
+    "prepack": "npm run build",
     "1session": "tsx bin/1session.ts"
   },
   "engines": {
@@ -31,6 +54,5 @@
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
-  },
-  "license": "MIT"
+  }
 }
