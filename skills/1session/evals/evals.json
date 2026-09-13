@@ -1,0 +1,47 @@
+{
+  "skill_name": "1session",
+  "evals": [
+    {
+      "id": 0,
+      "name": "cross-project-token-recall",
+      "prompt": "我记得前几天在某个会话里折腾 NPM_TOKEN 的时候踩过坑，好像还发现了什么安全问题。帮我找一下是哪个会话、当时结论是什么。",
+      "expected_output": "Searches globally (not just the current project), identifies session ca8325e1, reports the plaintext-token finding without reprinting the secret value, and cites the session id.",
+      "files": [],
+      "assertions": [
+        "Searches the whole machine, not only the current project directory (uses --global / --scope, or an equivalent machine-wide search)",
+        "Identifies the correct session ca8325e1 as where the NPM_TOKEN work happened",
+        "Reports the security finding: a token value sitting in plaintext in the session records, distinct from the harmless ${{ secrets.NPM_TOKEN }} CI references",
+        "Does not reprint the actual secret value in the answer",
+        "Cites a session id (or command) the user can re-run to verify the claim"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "project-recent-changes",
+      "prompt": "这个项目最近几天到底改了些什么？帮我按时间整理一个变更小结，我要拿去写 changelog。",
+      "expected_output": "Uses the current-directory scope, lists the recent sessions for this project, and produces a time-ordered summary grounded in session ids rather than in git log alone.",
+      "files": [],
+      "assertions": [
+        "Grounds the summary in actual sessions, citing at least two session ids, rather than reading git log alone",
+        "Output is ordered by time rather than by topic or hit count",
+        "Covers at least three of the four real workstreams: submodule/repo split, index+search layer, npm publish via GitHub Actions, title fix and --scope",
+        "Stays scoped to this project instead of dumping unrelated projects' sessions",
+        "Separates what the files prove from its own interpretation, instead of asserting motives as fact"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "bug-fix-drilldown",
+      "prompt": "之前有个 bug 是 here-doc 的正文被当成命令扫了，导致出现假文件假主机。那个是在哪个会话修的？具体改了什么、怎么验证的？",
+      "expected_output": "Finds session 3ab9fe0e turn 9 (commit 4a3dddb), reports the fix (stripHeredocs / analyzableCommand applied before command and path analysis) and how it was verified (before/after overview, two regression tests, no-collateral check on real sessions).",
+      "files": [],
+      "assertions": [
+        "Names session 3ab9fe0e (turn 9) as where the fix happened — not ca8325e1, which only referenced the bug later",
+        "Identifies the fix mechanism: here-doc bodies are stripped before command/path analysis (commit 4a3dddb)",
+        "Mentions at least two of the three symptom classes: fake files, fake hosts, fake jobs",
+        "Gives a drill-down handle — a turn/event number or an exact command the user can run to see the evidence",
+        "Reports how it was verified (tests green / the commit) rather than only describing the change"
+      ]
+    }
+  ]
+}
