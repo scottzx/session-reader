@@ -9,6 +9,7 @@ import type { ProviderAdapter } from '../src/parsers/provider.js';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { listRecentSessions, parseSince, resolveSession } from '../src/resolver.js';
+import { searchSessions } from '../src/search.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
 
@@ -120,4 +121,40 @@ test('aggregateWorkspaceSessions interleaves agents for one workspace', async (t
     for (const touch of touches) assert.ok(digest.sessions.some((s) => s.id === touch.sessionId));
   }
   assert.ok(digest.markdown.includes('跨智能体协作纪实'));
+});
+
+test('searchSessions rejects an empty query', async () => {
+  await assert.rejects(() => searchSessions('   '), /must not be empty/);
+});
+
+test('searchSessions finds a literal taken from a real session', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref) return t.skip('no local sessions');
+  const resolved = await resolveSession(ref.id);
+  assert.ok(resolved);
+  const session = await resolved.adapter.parse(resolved.candidate);
+  const needle = session.turns
+    .find((turn) => (turn.text ?? '').trim().length > 20)
+    ?.text?.replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 16);
+  if (!needle) return t.skip('no textual turn to search for');
+
+  const hits = await searchSessions(needle, { provider: ref.provider, limit: 5 });
+  const hit = hits.find((candidate) => candidate.session.id === ref.id);
+  assert.ok(hit, `expected ${ref.id} among ${hits.length} hits`);
+  assert.ok(hit.totalMatches >= 1);
+  assert.ok(hit.matches.length <= hit.totalMatches);
+  assert.ok(hit.matches.every((match) => match.excerpt.length > 0));
+});
+
+test('searchSessions honours the kind filter and regex mode', async (t) => {
+  const hits = await searchSessions('.', { regex: true, kinds: ['tool_call'], limit: 3, maxPerSession: 3 });
+  if (!hits.length) return t.skip('no local sessions with tool calls');
+  for (const hit of hits) {
+    for (const match of hit.matches) {
+      assert.equal(match.kind, 'tool_call');
+      assert.ok(match.toolName, 'tool call matches carry a tool name');
+    }
+  }
 });

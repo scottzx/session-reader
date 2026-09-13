@@ -31,11 +31,26 @@ npm run build && node dist/bin/1session.js <command>
 | `1session digest <session-id> [--focus marketing\|review\|full] [--json]` | 单会话蒸馏：目标、改动文件、命令、关键节点 |
 | `1session workspace [path] [--since 24h] [--limit n] [--digest] [--focus f] [--json]` | **按 pwd 跨智能体聚合**（默认 `.`）；带 `--digest` 输出统一故事线 |
 | `1session turns <session-id> [-n index] [--json]` | 逐轮轨迹；`-n` 查看单轮全文 / 完整工具参数 |
+| `1session search <query> [--workspace p] [--since 24h] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段 |
 
 `<session-id>` 支持完整 id、id 前缀（≥6 位）或原始文件路径。
 
 ```bash
 1session workspace . --since 24h --digest --focus marketing
+```
+
+跨会话检索（`--kind` 可过滤轮次类型，只看用户说了什么 / 只看工具调用）：
+
+```bash
+1session search "xhs|小红书" --regex --workspace ~/proj --since 24h --kind user
+```
+
+```text
+4 处命中，分布在 2 个会话
+
+### antigravity 5575981e  2026-09-13T00:21:05Z → 2026-09-13T03:31:58Z  (2 命中)
+  #318 user  /xhs-tech-card 结合 docs/xhs_sol_h3_spark_output/index.html，第一次实战经验贴。
+  #441 user  /mobile-xhs-publisher
 ```
 
 输出示例（上午 Antigravity 定方案 → 下午 Claude Code 落地实现，自动交织成一条时间线）：
@@ -61,11 +76,13 @@ import {
   parseSession,
   distillSession,
   aggregateWorkspaceSessions,
+  searchSessions,
 } from '@1agents/session-reader';
 
 const sessions = await findSessionsByWorkspace(process.cwd(), { since: '7d' });
 const digest = distillSession(await parseSession(sessions[0].id), { focus: 'marketing' });
 const story = await aggregateWorkspaceSessions(process.cwd(), { since: '24h' });
+const hits = await searchSessions('小红书', { workspace: process.cwd(), since: '24h', kinds: ['user'] });
 ```
 
 `aggregateWorkspaceSessions` 返回 `WorkspaceDigest`：`sessions` / `collaboratingAgents` /
@@ -77,6 +94,7 @@ const story = await aggregateWorkspaceSessions(process.cwd(), { since: '24h' });
 - **发现是分层的**：先按文件 mtime 排序候选（只 `stat`），再按需读文件头填充元数据，最后才整篇解析。`list` 与 `workspace` 通常在 0.5 秒内返回。
 - **`--since` 的精度**：预筛用文件 mtime（可能因同步/复制而失真），`--digest` 会在整篇解析后用真实轮次时间戳再过滤一次。
 - **Claude 标题**：`list` 只读文件头，标题取首个用户请求；`inspect`/`digest`/`workspace --digest` 会整篇解析，此时优先使用会话自身的 `custom-title` / `ai-title`。
+- **`search` 会整篇解析候选会话**（匹配的是 `text` + 工具结果 + 工具参数 JSON），所以先用 `--workspace` / `--since` / `--provider` 收窄，再放大 `--limit`（默认最多扫 30 个会话）。默认每个会话最多列 5 处命中，`totalMatches` 给的是真实总数。
 - **文件归属只统计"写"工具**（`Write`/`Edit`/`write_to_file`/`replace_file_content`/`apply_patch` 等）。通过 shell 写文件（heredoc、`sed -i`）不计入，命令本身仍会出现在 `commands` 里。
 
 ## 测试

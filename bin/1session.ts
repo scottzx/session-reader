@@ -3,9 +3,10 @@ import path from 'node:path';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { listRecentSessions, resolveSession } from '../src/resolver.js';
+import { searchSessions } from '../src/search.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
-import type { DigestFocus, NormalizedSession } from '../src/types.js';
+import type { DigestFocus, NormalizedSession, TurnKind } from '../src/types.js';
 
 const USAGE = `1session — cross-agent session Read Plane
 
@@ -14,6 +15,9 @@ const USAGE = `1session — cross-agent session Read Plane
   1session digest <session-id> [--focus marketing|review|full] [--json]
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session turns <session-id> [-n <turn-index>] [--json]
+  1session search <query> [--workspace path] [--since 24h] [--limit n] [--provider name]
+                          [--kind user,assistant,thinking,tool_call,tool_result]
+                          [--regex] [--case] [--context n] [--max-hits n] [--json]
 
 Providers: antigravity (~/.gemini/antigravity/brain), claude (~/.claude/projects), codex (~/.codex/sessions).
 `;
@@ -54,6 +58,11 @@ const num = (value: string | boolean | undefined): number | undefined => {
   const parsed = Number(str(value));
   return Number.isFinite(parsed) ? parsed : undefined;
 };
+const kindsOf = (value: string | boolean | undefined): TurnKind[] | undefined =>
+  str(value)
+    ?.split(',')
+    .map((kind) => kind.trim())
+    .filter(Boolean) as TurnKind[] | undefined;
 const focusOf = (value: string | boolean | undefined): DigestFocus => {
   const focus = str(value);
   return focus === 'marketing' || focus === 'full' ? focus : 'review';
@@ -186,6 +195,45 @@ async function main(): Promise<void> {
               `${(turn.toolName ?? '').padEnd(18)} ${oneLine(turn.text ?? turn.toolResult, 90)}`,
           )
           .join('\n'),
+      );
+      break;
+    }
+
+    case 'search': {
+      const query = positional.join(' ');
+      const hits = await searchSessions(query, {
+        workspace: str(flags.workspace),
+        since: str(flags.since),
+        limit: num(flags.limit),
+        provider: str(flags.provider) as never,
+        kinds: kindsOf(flags.kind),
+        regex: flags.regex === true,
+        caseSensitive: flags.case === true,
+        context: num(flags.context),
+        maxPerSession: num(flags['max-hits']),
+      });
+      const total = hits.reduce((sum, hit) => sum + hit.totalMatches, 0);
+      print(
+        json,
+        hits,
+        hits.length
+          ? [
+              `${total} 处命中，分布在 ${hits.length} 个会话`,
+              ...hits.flatMap((hit) => [
+                '',
+                `### ${hit.session.provider} ${hit.session.id.slice(0, 8)}  ` +
+                  `${hit.session.createdAt ?? '?'} → ${hit.session.updatedAt ?? '?'}  (${hit.totalMatches} 命中)`,
+                `    ${oneLine(hit.session.title, 80)}`,
+                ...hit.matches.map(
+                  (match) =>
+                    `  #${match.index} ${match.kind}${match.toolName ? `(${match.toolName})` : ''}  ${match.excerpt}`,
+                ),
+                ...(hit.totalMatches > hit.matches.length
+                  ? [`  …另有 ${hit.totalMatches - hit.matches.length} 处（--max-hits 调大或 --json 查看全部）`]
+                  : []),
+              ]),
+            ].join('\n')
+          : `无命中：${query}`,
       );
       break;
     }

@@ -27,6 +27,12 @@ export {
 } from './resolver.js';
 
 export { distillSession, editedFiles, shellCommand } from './distiller.js';
+export {
+  searchSessions,
+  type SearchHit,
+  type SearchMatch,
+  type SearchOptions,
+} from './search.js';
 export { aggregateWorkspaceSessions, type AggregateOptions } from './aggregator.js';
 export type { ProviderAdapter, SessionCandidate } from './parsers/provider.js';
 export { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
