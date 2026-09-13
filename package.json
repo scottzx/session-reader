@@ -30,7 +30,7 @@
     }
   },
   "bin": {
-    "1session": "./dist/bin/1session.js"
+    "1session": "dist/bin/1session.js"
   },
   "files": [
     "dist",
