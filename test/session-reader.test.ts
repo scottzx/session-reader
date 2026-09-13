@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -51,6 +52,27 @@ test('parseSince understands relative windows and ISO dates', () => {
   assert.ok(day && Math.abs(Date.now() - day - 86_400_000) < 2_000);
   assert.equal(parseSince('2026-01-02'), Date.parse('2026-01-02'));
   assert.equal(parseSince(undefined), undefined);
+});
+
+/** Claude records its own titles after the opening prompt; both must win over it. */
+test('claude: scanRef prefers the session title over the first prompt', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'session-reader-'));
+  const write = async (name: string, lines: unknown[]) => {
+    const file = path.join(dir, name);
+    await fs.writeFile(file, lines.map((line) => JSON.stringify(line)).join('\n'));
+    return { id: name.replace(/\.jsonl$/, ''), path: file, mtimeMs: Date.now(), sizeBytes: 0 };
+  };
+  const prompt = { type: 'user', cwd: '/tmp/ws', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: 'hi' } };
+
+  const ai = await write('ai.jsonl', [prompt, { type: 'ai-title', aiTitle: '发布 npm 包' }]);
+  assert.equal((await claudeAdapter.scanRef(ai)).title, '发布 npm 包');
+  assert.equal((await claudeAdapter.parse(ai)).ref.title, '发布 npm 包');
+
+  const both = await write('both.jsonl', [prompt, { type: 'ai-title', aiTitle: '发布 npm 包' }, { type: 'custom-title', customTitle: '我改的标题' }]);
+  assert.equal((await claudeAdapter.scanRef(both)).title, '我改的标题');
+
+  const plain = await write('plain.jsonl', [prompt]);
+  assert.equal((await claudeAdapter.scanRef(plain)).title, 'hi');
 });
 
 /** Every adapter must produce well-formed turns from the newest real session. */

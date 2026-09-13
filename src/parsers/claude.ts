@@ -36,7 +36,7 @@ interface Entry {
   isMeta?: boolean;
   isSidechain?: boolean;
   customTitle?: string;
-  title?: string;
+  aiTitle?: string;
   attachment?: { type?: string };
   message?: {
     id?: string;
@@ -93,28 +93,33 @@ export const claudeAdapter: ProviderAdapter = {
   },
 
   /**
-   * Only the head of the file is read, so the title is the opening request —
-   * a session's own `custom-title`/`ai-title` is picked up by {@link parse}.
+   * Only the head of the file is read. Claude writes its own titles a few
+   * lines after the opening request, so the scan does not stop at the first
+   * prompt — it keeps reading the head for a `custom-title`/`ai-title`.
    */
   async scanRef(candidate: SessionCandidate): Promise<SessionRef> {
-    let title: string | undefined;
+    let customTitle: string | undefined;
+    let aiTitle: string | undefined;
+    let firstPrompt: string | undefined;
     let workspace: string | undefined;
     let createdAt: string | undefined;
     for await (const raw of readJsonl(candidate.path, { maxLines: 60 })) {
       const entry = raw as Entry;
       if (entry.cwd) workspace ??= canonicalizePath(entry.cwd);
       createdAt ??= entry.timestamp;
-      if (entry.type === 'custom-title' && entry.customTitle) title = entry.customTitle;
-      if (!title && entry.type === 'user' && !entry.isMeta && typeof entry.message?.content === 'string') {
-        title = oneLine(stripPromptEnvelope(entry.message.content), 120);
+      if (entry.type === 'custom-title' && entry.customTitle) customTitle = entry.customTitle;
+      if (entry.type === 'ai-title' && entry.aiTitle) aiTitle = entry.aiTitle;
+      if (!firstPrompt && entry.type === 'user' && !entry.isMeta && typeof entry.message?.content === 'string') {
+        firstPrompt = oneLine(stripPromptEnvelope(entry.message.content), 120);
       }
-      if (title && workspace) break;
+      // A user-set title outranks everything, so nothing later can beat it.
+      if (customTitle && workspace) break;
     }
     return {
       id: candidate.id,
       provider: 'claude',
       path: candidate.path,
-      title,
+      title: customTitle ?? aiTitle ?? firstPrompt,
       workspace,
       createdAt,
       updatedAt: new Date(candidate.mtimeMs).toISOString(),
@@ -129,7 +134,8 @@ export const claudeAdapter: ProviderAdapter = {
     let cacheRead = 0;
     // One assistant message can appear on several entries; count its usage once.
     const countedUsage = new Set<string>();
-    let title: string | undefined;
+    let customTitle: string | undefined;
+    let aiTitle: string | undefined;
     let firstPrompt: string | undefined;
     let workspace: string | undefined;
     let createdAt: string | undefined;
@@ -146,8 +152,8 @@ export const claudeAdapter: ProviderAdapter = {
         createdAt ??= entry.timestamp;
         updatedAt = entry.timestamp;
       }
-      if (entry.type === 'custom-title' && entry.customTitle) title = entry.customTitle;
-      if (entry.type === 'ai-title' && typeof entry.title === 'string') title ??= entry.title;
+      if (entry.type === 'custom-title' && entry.customTitle) customTitle = entry.customTitle;
+      if (entry.type === 'ai-title' && entry.aiTitle) aiTitle = entry.aiTitle;
 
       if (entry.gitBranch && !stats.branches.includes(entry.gitBranch)) stats.branches.push(entry.gitBranch);
       const model = entry.message?.model;
@@ -223,7 +229,7 @@ export const claudeAdapter: ProviderAdapter = {
         id: candidate.id,
         provider: 'claude',
         path: candidate.path,
-        title: title ?? firstPrompt,
+        title: customTitle ?? aiTitle ?? firstPrompt,
         workspace,
         createdAt,
         updatedAt: updatedAt ?? new Date(candidate.mtimeMs).toISOString(),
