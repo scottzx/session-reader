@@ -111,6 +111,7 @@ T 3 2026-09-11T13:03:29 (283s)  事件 29–45  文件 1 · 命令 7 · 失败 0
 import {
   listRecentSessions,
   findSessionsByWorkspace,
+  loadSession,
   parseSession,
   distillSession,
   aggregateWorkspaceSessions,
@@ -125,7 +126,7 @@ const sessions = await findSessionsByWorkspace(process.cwd(), { since: '7d' });
 const digest = distillSession(await parseSession(sessions[0].id), { focus: 'marketing' });
 const story = await aggregateWorkspaceSessions(process.cwd(), { since: '24h' });
 const hits = await searchSessions('小红书', { workspace: process.cwd(), since: '24h', kinds: ['user'] });
-const session = await parseSession('01a0907c');
+const session = await loadSession('01a0907c'); // 走索引；parseSession 直读源文件
 const overview = buildOverview(session);      // 第 1 层：overview.stats / overview.markdown
 const turns = summarizeTurns(session);        // 第 2 层
 const detail = turnDetail(session, 3);        // 第 3 层
@@ -136,13 +137,15 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 `unifiedTimeline`（按时间排序的跨智能体节点）/ `fileAttribution`（文件 → 谁在什么时候改的）/ `markdown`。
 适合直接喂给下游做小红书笔记、PRD、周报与 changelog，也可零成本包成 DeepSeek Harness（Cordis）插件或 MCP server。
 
-## 事实分层：这个模块只做前两层
+## 事实的边界：到哪一步为止
 
-| 层 | 内容 | 例子 |
+（注意与下文「索引」的 L0–L3 不是一回事：那是**数据存在哪**，这里是**事实可信到什么程度**。）
+
+| 档 | 内容 | 例子 |
 | --- | --- | --- |
-| **L1 源文件显式字段** | 各家自己记好的结构化数据，零猜测 | codex `CommandExecution` 的 336 条命令（带 `exit_code`/`stderr`/`pid`/`duration`）、`FileChange`、token 记账；claude 的 `gitBranch`/`model`/`usage`；antigravity 的产物 metadata、上传、任务回执 |
-| **L2 确定性规则派生** | 纯规则，可重复、可验证 | antigravity 打印的 `The command exited with code N` → 211 条 exit_code；`ssh user@host` → 主机；`git commit -m` + `[branch sha]` 回显 → 提交；路径按项目/运行态/日志分组；每个资源的首见/末见轮次 |
-| **L3 语义解释** | **本模块不做** | 当前主线、目标漂移、已完成/阻塞/下一步、决策归纳、坑的因果链、资源的 primary/legacy 角色 |
+| **源文件显式字段** | 各家自己记好的结构化数据，零猜测 | codex `CommandExecution` 的 336 条命令（带 `exit_code`/`stderr`/`pid`/`duration`）、`FileChange`、token 记账；claude 的 `gitBranch`/`model`/`usage`；antigravity 的产物 metadata、上传、任务回执 |
+| **确定性规则派生** | 纯规则，可重复、可验证 | antigravity 打印的 `The command exited with code N` → 211 条 exit_code；`ssh user@host` → 主机；`git commit -m` + `[branch sha]` 回显 → 提交；路径按项目/运行态/日志分组；每个资源的首见/末见轮次 |
+| **语义解释** | **本模块不做** | 当前主线、目标漂移、已完成/阻塞/下一步、决策归纳、坑的因果链、资源的 primary/legacy 角色 |
 
 所以 overview 回答的是"**最后一条成功命令是什么**"，而不是"当前阻塞是什么"；给出"末态事实"而不是"进度判断"。语义层留白处会显式写明 `属语义层，本阶段不生成`，不假装。
 
@@ -157,12 +160,13 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 | `candidate` | 仅在文本里被提到，没有任何人动过它 | `text:path-mention`（只出现在「资源」一段） |
 
 ```bash
-1session files 3ab9fe0e --group project
+1session files 3ab9fe0e --group all
 ```
 
 ```text
 [project] derived   T1 src/types.ts　`shell:redirect E42`
-[project] observed  T7 src/ledger.ts　`tool:Write E421`
+[runtime] observed  T5 ~/.claude/plans/codex-01a0907c-….md　`tool:Write E206`
+[project] derived   T7 src/ledger.ts　`shell:redirect E415`
 ```
 
 **文件账本永远不含 `candidate`**——路径只有在证明发生过写操作后才会进来。「资源」一段是唯一收纳 candidate 的地方，标题里写明了。
@@ -205,9 +209,9 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 - **`--since` 的精度**：预筛用文件 mtime（可能因同步/复制而失真），`--digest` 会在整篇解析后用真实轮次时间戳再过滤一次。
 - **Claude 标题**：`list` 只读文件头，标题取首个用户请求；`inspect`/`digest`/`workspace --digest` 会整篇解析，此时优先使用会话自身的 `custom-title` / `ai-title`。
 - **`search` 没有扫描上限**。早先它受发现层的扫描预算限制，一次查询其实只看最近 ~60 个会话／每个智能体，却把结果报告得像查全了——"静默不全"比慢危险。现在 `--limit` 只管返回几个会话，不再兼任"最多检查几个会话"；满足 `--workspace` / `--since` / `--provider` 的会话一个不漏。默认每个会话最多列 5 处命中，`totalMatches` 给的是真实总数。
-- **文件归属分两级置信度**。`explicit` 来自显式写工具（`Write`/`Edit`/`write_to_file`/`replace_file_content`/`apply_patch`）；`inferred` 是从 shell 命令里解析出来的（`>`/`>>`、`tee`、`cp`/`mv`、`scp`、`sed -i`、python 的 `write_text`/`open(w)`），在展示时标 `~`。没有它，纯靠 shell 干活的智能体（如 codex 全程走 `exec` 沙箱）会显示成"一个文件都没改过"。这是启发式，可能漏也可能多报。
+- **文件归属分三级溯源**（见上文 provenance）。`observed` 来自显式写工具（`Write`/`Edit`/`write_to_file`/`replace_file_content`/`apply_patch`）与 provider 自己记的 `FileChange`；`derived` 是从 shell 命令里解析出来的（`>`/`>>`、`tee`、`cp`/`mv`、`scp`、`sed -i`、python 的 `write_text`/`open(w)`）。没有后者，纯靠 shell 干活的智能体（如 codex 全程走 `exec` 沙箱）会显示成"一个文件都没改过"。这是启发式，可能漏也可能多报，所以每行都写明是哪条规则提取的。
 - **轮次边界按"其后最近开始的那一轮"归属**。`task_started` 总比该轮第一个事件早几秒（12:41:06 vs 12:41:13），按"落在窗口内"匹配会全部落空。
-- **统计优先用各家自己记的结构化数据，而不是我们推断**。codex 的 `event_msg/item_completed` 里有 `FileChange`（带 diff）、`CommandExecution`（带 pid/cwd）、`task_started/task_complete`（轮次边界 + 耗时）与 `token_usage_record`；claude 每条都带 `gitBranch`/`model`/`usage`；antigravity 的产物、上传、后台任务分别在 brain 目录、`.user_uploaded/` 与 `.system_generated/{tasks,messages}/`。统计里 `fileChangeSource` 会标明这次是 `provider` 还是 `inferred`。
+- **统计优先用各家自己记的结构化数据，而不是我们推断**。codex 的 `event_msg/item_completed` 里有 `FileChange`（带 diff）、`CommandExecution`（带 pid/cwd）、`task_started/task_complete`（轮次边界 + 耗时）与 `token_usage_record`；claude 每条都带 `gitBranch`/`model`/`usage`；antigravity 的产物、上传、后台任务分别在 brain 目录、`.user_uploaded/` 与 `.system_generated/{tasks,messages}/`。统计里 `filesByProvenance` 给出这次的 `observed / derived` 分项计数。
 - **轮次边界按时间对齐，不按下标**。codex 原生边界（12 个）比用户消息（15 条）少，按下标取耗时会错位。
 - **token 把缓存复用单列**。claude 每次请求的真实 `input_tokens` 平均只有 2，而 `cache_read_input_tokens` 平均 30 万（重读整个缓存前缀）；把后者计入输入会让一个 20 万上下文的会话显示成 1.16 亿 token。现在 `input` 只含真正写入模型的部分，缓存复用记在 `cacheRead`。
 - **失败只有一个定义**：exit code 明确非 0，或 exit code 未知但 provider 标了错。`stats.errors` 与 `1session errors` 永远是同一个数。
@@ -236,7 +240,7 @@ L3  会话关系  session_edges / edge_evidence
 
 指纹 = 大小 + mtime + 文件头 64KB 的 sha256。没有"会话是否结束"这个概念——指纹没变就是没变。
 
-**事件文本整条存，不截断**。曾经按 128KB 封顶，实测代价是全库 622 个会话里只有 7 个事件超限、省下 0.08% 的体积，却让 `search` 漏掉长构建日志里的命中（`--deployment-target` 正好落在切口之后）——用 0.08% 换一个"看起来查全了其实没有"的答案，方向反了。本机实测：622 个会话首次回填 7.5s，索引 304MB。
+**事件文本整条存，不截断**。曾经按 128KB 封顶，实测代价是全库 622 个会话里只有 7 个事件超限、省下 0.08% 的体积，却让 `search` 漏掉长构建日志里的命中（`--deployment-target` 正好落在切口之后）——用 0.08% 换一个"看起来查全了其实没有"的答案，方向反了。本机实测：622 个会话首次回填 7.5s，索引 297MB。
 
 **索引只许加速事实，不许改动事实**。测试里钉着一条往返等价：三个 provider 各取一个真实会话，`parse()` 的结果与索引读回的结果必须 `deepStrictEqual`，`buildOverview` 的 markdown 也必须逐字相同。命令行上随时可复核：
 
@@ -278,11 +282,11 @@ Hit
 
 | 查询 | 改造前 | 现在 |
 | --- | --- | --- |
-| `deploy`（1631 命中 / 239 会话） | 1.62s※ | 0.55s |
-| `会话`（2336 命中 / 263 会话） | 1.14s※ | 0.39s |
-| `src/ledger.ts` | 1.1s※ | 0.46s |
+| `deploy`（1631 命中 / 239 会话） | 1.62s※ | 0.47–0.60s |
+| `会话`（2336 命中 / 263 会话） | 1.14s※ | 0.35–0.39s |
+| `src/ledger.ts` | 1.1s※ | 0.43–0.46s |
 
-※ 改造前那几个数字还只覆盖了 ≤180 个会话。现在是全库，而且 `search` 与 `search --no-index` 的**会话集合 / 命中数 / excerpt / 顺序逐项相同**（10 种查询形态验证过）。
+※ 改造前那几个数字还只覆盖了 ≤180 个会话。以上都是热缓存；文件缓存冷时首跑约 1.8s，绝大部分花在 622 次 stat 与指纹头读上。现在是全库，而且 `search` 与 `search --no-index` 的**会话集合 / 命中数 / excerpt / 顺序逐项相同**（10 种查询形态验证过）。
 
 ### 会话关系图（L3）
 

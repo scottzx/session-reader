@@ -68,7 +68,10 @@ export {
   type FileWrite,
 } from './writes.js';
 export {
+  mandatoryLiteral,
+  planQuery,
   searchSessions,
+  type QueryPlan,
   type SearchHit,
   type SearchMatch,
   type SearchOptions,
@@ -77,7 +80,15 @@ export { aggregateWorkspaceSessions, type AggregateOptions } from './aggregator.
 export type { ProviderAdapter, SessionCandidate } from './parsers/provider.js';
 export { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
 export { defaultDbPath, openStore, resetStoreCache } from './store/db.js';
-export { indexSession, type IndexAction, type IndexOptions, type IndexResult } from './store/indexer.js';
+export {
+  indexSession,
+  refreshSession,
+  type IndexAction,
+  type IndexOptions,
+  type IndexResult,
+  type RefreshResult,
+} from './store/indexer.js';
+export { searchRows, type RowQuery, type TextRow } from './store/rows.js';
 export { findSessionRow, readSession, sessionRow, type SessionRow } from './store/read.js';
 export {
   captureRuntimeEdge,
