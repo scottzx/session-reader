@@ -5,7 +5,15 @@ import { readJsonl } from '../util/jsonl.js';
 import { canonicalizePath } from '../util/paths.js';
 import { looksLikeInstructions, oneLine, stripPromptEnvelope } from '../util/text.js';
 import { toolArgsOf, type ProviderAdapter, type SessionCandidate } from './provider.js';
-import type { NormalizedSession, SessionRef, TurnEvent } from '../types.js';
+import {
+  emptyProviderStats,
+  type FileChange,
+  type NormalizedSession,
+  type ProviderStats,
+  type SessionRef,
+  type TokenUsage,
+  type TurnEvent,
+} from '../types.js';
 
 const SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
 const ROLLOUT = /^rollout-.*?-([0-9a-fA-F-]{36})\.jsonl$/;
@@ -19,6 +27,81 @@ interface Line {
 interface ContentBlock {
   type?: string;
   text?: string;
+}
+
+/** `event_msg/item_completed` carries codex's own structured record of a step. */
+interface CompletedItem {
+  type?: string;
+  id?: string;
+  process_id?: string;
+  command?: string[] | string;
+  changes?: Record<string, { type?: string; content?: string }>;
+}
+
+const CHANGE_KINDS: Record<string, FileChange['change']> = {
+  add: 'add',
+  update: 'update',
+  delete: 'delete',
+};
+
+/**
+ * Absorbs the structured side-channel: authoritative file changes, command
+ * executions with pids, turn boundaries and token accounting. These mirror the
+ * conversation stream, so they feed statistics only — never the turn list.
+ */
+function absorbEvent(line: Line, stats: ProviderStats, tokens: TokenUsage): void {
+  const payload = line.payload ?? {};
+
+  if (line.type === 'token_usage_record') {
+    const usage = payload.usage as Record<string, number> | undefined;
+    if (usage) {
+      tokens.input += usage.input_tokens ?? 0;
+      tokens.output += usage.output_tokens ?? 0;
+      tokens.total += usage.total_tokens ?? 0;
+    }
+    return;
+  }
+  if (line.type === 'event_msg' && payload.type === 'thread_settings_applied') {
+    const model = (payload.thread_settings as { model?: string } | undefined)?.model;
+    if (model && !stats.models.includes(model)) stats.models.push(model);
+    return;
+  }
+  if (line.type === 'event_msg' && payload.type === 'task_started') {
+    stats.turnBoundaries.push({ startedAt: line.timestamp });
+    return;
+  }
+  if (line.type === 'event_msg' && payload.type === 'task_complete') {
+    const current = stats.turnBoundaries.at(-1);
+    if (current && !current.endedAt) {
+      current.endedAt = line.timestamp;
+      current.durationMs = payload.duration_ms as number | undefined;
+      current.lastMessage = payload.last_agent_message as string | undefined;
+    }
+    return;
+  }
+  if (line.type !== 'event_msg' || payload.type !== 'item_completed') return;
+
+  const item = (payload.item ?? {}) as CompletedItem;
+  switch (item.type) {
+    case 'FileChange':
+      for (const [file, detail] of Object.entries(item.changes ?? {})) {
+        stats.fileChanges.push({
+          path: canonicalizePath(file),
+          change: CHANGE_KINDS[detail?.type ?? ''] ?? 'update',
+          sizeBytes: detail?.content?.length,
+        });
+      }
+      break;
+    case 'CommandExecution':
+      stats.commandExecutions = (stats.commandExecutions ?? 0) + 1;
+      break;
+    case 'Reasoning':
+    case 'AgentMessage':
+    case 'UserMessage':
+      break;
+    default:
+      if (item.type) stats.extras[item.type] = (stats.extras[item.type] ?? 0) + 1;
+  }
 }
 
 function textOf(content: unknown): string {
@@ -105,6 +188,8 @@ export const codexAdapter: ProviderAdapter = {
 
   async parse(candidate: SessionCandidate): Promise<NormalizedSession> {
     const turns: TurnEvent[] = [];
+    const stats = emptyProviderStats();
+    const tokens: TokenUsage = { input: 0, output: 0, total: 0 };
     let title: string | undefined;
     let workspace: string | undefined;
     let createdAt: string | undefined;
@@ -126,8 +211,10 @@ export const codexAdapter: ProviderAdapter = {
         if (typeof payload.cwd === 'string') workspace ??= canonicalizePath(payload.cwd);
         continue;
       }
-      // `event_msg` mirrors `response_item`; keeping both would double every turn.
-      if (line.type !== 'response_item') continue;
+      if (line.type !== 'response_item') {
+        absorbEvent(line, stats, tokens);
+        continue;
+      }
 
       switch (payload.type) {
         case 'message': {
@@ -206,6 +293,7 @@ export const codexAdapter: ProviderAdapter = {
       },
       turns,
       artifacts: [],
+      stats: { ...stats, ...(tokens.total ? { tokens } : {}) },
     };
   },
 };

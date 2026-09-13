@@ -2,7 +2,8 @@
 import path from 'node:path';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
-import { buildHandoff } from '../src/handoff.js';
+import { buildOverview } from '../src/overview.js';
+import { eventDetail, summarizeTurns, turnDetail } from '../src/turns.js';
 import { listRecentSessions, resolveSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
 import { canonicalizePath } from '../src/util/paths.js';
@@ -12,11 +13,11 @@ import type { DigestFocus, NormalizedSession, TurnKind } from '../src/types.js';
 const USAGE = `1session — cross-agent session Read Plane
 
   1session list [--limit <n>] [--workspace <path>] [--provider <name>] [--since 24h] [--json]
-  1session inspect <session-id> [--json]
+  1session overview <session-id> [--json]              第 1 层：会话概要
+  1session turns <session-id> [--json]                 第 2 层：逐轮概要
+  1session turn <session-id> <n> [--event <k>] [--json] 第 3 层：单轮 / 单次工具调用明细
   1session digest <session-id> [--focus marketing|review|full] [--json]
-  1session handoff <session-id> [--anchors <n>] [--json]
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
-  1session turns <session-id> [-n <turn-index>] [--json]
   1session search <query> [--workspace path] [--since 24h] [--limit n] [--provider name]
                           [--kind user,assistant,thinking,tool_call,tool_result]
                           [--regex] [--case] [--context n] [--max-hits n] [--json]
@@ -57,7 +58,9 @@ function parseArgs(argv: string[]): Args {
 const str = (value: string | boolean | undefined): string | undefined =>
   typeof value === 'string' ? value : undefined;
 const num = (value: string | boolean | undefined): number | undefined => {
-  const parsed = Number(str(value));
+  const text = typeof value === 'string' ? value : undefined;
+  if (text === undefined) return undefined;
+  const parsed = Number(text);
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 const kindsOf = (value: string | boolean | undefined): TurnKind[] | undefined =>
@@ -107,28 +110,10 @@ async function main(): Promise<void> {
       break;
     }
 
-    case 'inspect': {
+    case 'overview': {
       const session = await load(positional[0]);
-      const counts = session.turns.reduce<Record<string, number>>((acc, turn) => {
-        acc[turn.kind] = (acc[turn.kind] ?? 0) + 1;
-        return acc;
-      }, {});
-      print(
-        json,
-        { ...session.ref, turnCount: session.turns.length, counts, artifacts: session.artifacts.map((a) => a.path) },
-        [
-          `id        ${session.ref.id}`,
-          `provider  ${session.ref.provider}`,
-          `title     ${session.ref.title ?? '-'}`,
-          `workspace ${session.ref.workspace ?? '-'}`,
-          `time      ${session.ref.createdAt ?? '?'} → ${session.ref.updatedAt ?? '?'}`,
-          `file      ${session.ref.path}`,
-          `turns     ${session.turns.length} (${Object.entries(counts)
-            .map(([kind, count]) => `${kind}:${count}`)
-            .join(' ')})`,
-          `artifacts ${session.artifacts.map((a) => a.name).join(', ') || '-'}`,
-        ].join('\n'),
-      );
+      const overview = buildOverview(session);
+      print(json, overview, overview.markdown);
       break;
     }
 
@@ -136,13 +121,6 @@ async function main(): Promise<void> {
       const session = await load(positional[0]);
       const digest = distillSession(session, { focus: focusOf(flags.focus) });
       print(json, digest, digest.markdown);
-      break;
-    }
-
-    case 'handoff': {
-      const session = await load(positional[0]);
-      const brief = buildHandoff(session, { anchorLimit: num(flags.anchors) });
-      print(json, brief, brief.markdown);
       break;
     }
 
@@ -179,31 +157,63 @@ async function main(): Promise<void> {
 
     case 'turns': {
       const session = await load(positional[0]);
-      const index = num(flags.n);
-      if (index !== undefined) {
-        const turn = session.turns[index];
-        if (!turn) throw new Error(`no turn ${index} (session has ${session.turns.length})`);
+      const summaries = summarizeTurns(session);
+      print(
+        json,
+        summaries,
+        [
+          `${summaries.length} 轮 · 共 ${session.turns.length} 个事件`,
+          '',
+          ...summaries.flatMap((turn) => [
+            `T${String(turn.no).padStart(2, ' ')} ${turn.startedAt?.slice(0, 19) ?? '?'}` +
+              `${turn.durationMs ? ` (${Math.round(turn.durationMs / 1000)}s)` : ''}` +
+              `  事件 ${turn.events[0]}–${turn.events[1]}` +
+              `  文件 ${turn.files.length} · 命令 ${turn.commands} · 失败 ${turn.errors}`,
+            `    ▸ ${turn.prompt}`,
+            ...(turn.outcome ? [`    ◂ ${turn.outcome}`] : []),
+          ]),
+        ].join('\n'),
+      );
+      break;
+    }
+
+    case 'turn': {
+      const session = await load(positional[0]);
+      const eventIndex = num(flags.event);
+      if (eventIndex !== undefined) {
+        const detail = await eventDetail(session, eventIndex);
+        const body = detail.fullText ?? detail.text ?? detail.toolResult ?? '';
         print(
           json,
-          turn,
+          detail,
           [
-            `#${turn.index} ${turn.kind}${turn.toolName ? `(${turn.toolName})` : ''} ${turn.timestamp ?? ''}`,
-            '',
-            turn.text ?? turn.toolResult ?? JSON.stringify(turn.toolArgs, null, 2) ?? '',
+            `#${detail.index} ${detail.kind}${detail.toolName ? `(${detail.toolName})` : ''} ${detail.timestamp ?? ''}` +
+              `${detail.truncated ? (detail.fullText ? '  [已从 steps/ 补全]' : '  [已截断]') : ''}`,
+            ...(detail.toolArgs ? ['', '参数：', JSON.stringify(detail.toolArgs, null, 2)] : []),
+            ...(body ? ['', '内容：', body] : []),
+            ...(detail.truncationNote ? ['', `⚠️ ${detail.truncationNote}`] : []),
           ].join('\n'),
         );
         break;
       }
+      const detail = turnDetail(session, num(positional[1]) ?? 1);
       print(
         json,
-        session.turns,
-        session.turns
-          .map(
-            (turn) =>
-              `${String(turn.index).padStart(4, ' ')} ${turn.kind.padEnd(11)}` +
-              `${(turn.toolName ?? '').padEnd(18)} ${oneLine(turn.text ?? turn.toolResult, 90)}`,
-          )
-          .join('\n'),
+        detail,
+        [
+          `T${detail.summary.no}  ${detail.summary.startedAt ?? '?'} → ${detail.summary.endedAt ?? '?'}` +
+            `  事件 ${detail.summary.events[0]}–${detail.summary.events[1]}`,
+          `▸ ${detail.summary.prompt}`,
+          ...(detail.summary.files.length ? ['', `改动：${detail.summary.files.join(', ')}`] : []),
+          '',
+          ...detail.events.map((event) => {
+            const head = `#${event.index} ${event.kind}${event.toolName ? `(${event.toolName})` : ''}` +
+              `${event.truncated ? ' [截断]' : ''}${event.isError ? ' ✗' : ''}`;
+            return `${head}  ${oneLine(event.text ?? event.toolResult ?? JSON.stringify(event.toolArgs), 160)}`;
+          }),
+          '',
+          `（用 --event <k> 展开单个事件的完整内容）`,
+        ].join('\n'),
       );
       break;
     }

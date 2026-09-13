@@ -11,7 +11,8 @@ import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { listRecentSessions, parseSince, resolveSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
-import { buildHandoff } from '../src/handoff.js';
+import { buildOverview, classifyUserTurn } from '../src/overview.js';
+import { eventDetail, summarizeTurns, turnDetail } from '../src/turns.js';
 import { fileWrites, resolveWritePath } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
@@ -211,20 +212,70 @@ test('fileWrites attributes remote writes to the ssh host, in the right directio
   assert.equal(pushed.host, '1.2.3.4');
 });
 
-test('buildHandoff extracts takeover state from a real session', async (t) => {
+test('buildOverview reports session-level stats from a real session', async (t) => {
   const [ref] = await listRecentSessions({ limit: 1 });
   if (!ref) return t.skip('no local sessions');
   const resolved = await resolveSession(ref.id);
   assert.ok(resolved);
-  const brief = buildHandoff(await resolved.adapter.parse(resolved.candidate));
+  const session = await resolved.adapter.parse(resolved.candidate);
+  const overview = buildOverview(session);
 
-  assert.equal(brief.session.id, ref.id);
-  assert.ok(brief.markdown.includes('## 目标'));
-  assert.ok(brief.markdown.includes('## 状态锚点'));
-  assert.ok(
-    brief.goal || brief.anchors.paths.length || brief.writes.length,
-    'a session should yield at least a goal, an anchor or a write',
+  assert.equal(overview.session.id, ref.id);
+  assert.ok(overview.markdown.includes('## 统计'));
+  assert.ok(overview.markdown.includes('## 落盘（全量）'));
+  assert.equal(
+    overview.stats.events.tool_call,
+    session.turns.filter((turn) => turn.kind === 'tool_call').length,
   );
-  for (const anchor of brief.anchors.paths) assert.ok(anchor.hits > 0);
-  for (const thread of brief.openThreads) assert.ok(thread.command.length > 0);
+  assert.ok(overview.stats.turns > 0);
+  assert.equal(overview.stats.fileChangeSource, session.stats.fileChanges.length ? 'provider' : 'inferred');
+});
+
+test('classifyUserTurn separates corrections from nudges and pasted reports', () => {
+  assert.equal(classifyUserTurn('继续'), 'nudge');
+  assert.equal(classifyUserTurn('continue'), 'nudge');
+  assert.equal(classifyUserTurn('这个描述不对，应该改成 MiniMax-H3'), 'correction');
+  // Short instructions are real work, not filler.
+  assert.equal(classifyUserTurn('检查一下进度'), 'correction');
+  assert.equal(classifyUserTurn(`### 🎉 阶段性重大进展\n${'详细报告内容。'.repeat(60)}`), 'paste');
+});
+
+test('summarizeTurns splits a session on user messages and covers every event', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref) return t.skip('no local sessions');
+  const resolved = await resolveSession(ref.id);
+  assert.ok(resolved);
+  const session = await resolved.adapter.parse(resolved.candidate);
+  const summaries = summarizeTurns(session);
+  if (!summaries.length) return t.skip('session has no turns');
+
+  assert.equal(summaries[0]!.events[0], 0, 'the first turn starts at the first event');
+  assert.equal(summaries.at(-1)!.events[1], session.turns.length - 1, 'the last turn ends at the last event');
+  for (let i = 1; i < summaries.length; i++) {
+    assert.equal(summaries[i]!.events[0], summaries[i - 1]!.events[1] + 1, 'turns must tile without gaps');
+  }
+  const detail = turnDetail(session, 1);
+  assert.equal(detail.events.length, summaries[0]!.eventCount);
+});
+
+test('eventDetail recovers antigravity output that the transcript truncated', async (t) => {
+  const refs = await listRecentSessions({ limit: 8, provider: 'antigravity' });
+  for (const ref of refs) {
+    const resolved = await resolveSession(ref.id);
+    if (!resolved) continue;
+    const session = await resolved.adapter.parse(resolved.candidate);
+    const cut = session.turns.find((turn) => turn.truncated && turn.sourceIndex !== undefined);
+    if (!cut) continue;
+
+    const detail = await eventDetail(session, cut.index);
+    assert.ok(detail.fullText || detail.truncationNote, 'a truncated event must resolve or say why not');
+    if (detail.fullText) {
+      assert.ok(
+        detail.fullText.length >= (cut.toolResult ?? cut.text ?? '').length,
+        'the recovered copy must not be shorter than the transcript one',
+      );
+    }
+    return;
+  }
+  t.skip('no truncated antigravity events available');
 });

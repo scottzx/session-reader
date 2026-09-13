@@ -4,7 +4,13 @@ import path from 'node:path';
 import { readJsonl } from '../util/jsonl.js';
 import { canonicalizePath } from '../util/paths.js';
 import { oneLine, stripPromptEnvelope } from '../util/text.js';
-import type { NormalizedSession, SessionRef, TurnEvent } from '../types.js';
+import {
+  emptyProviderStats,
+  type NormalizedSession,
+  type SessionRef,
+  type TokenUsage,
+  type TurnEvent,
+} from '../types.js';
 import { toolArgsOf, type ProviderAdapter, type SessionCandidate } from './provider.js';
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -25,10 +31,18 @@ interface Entry {
   uuid?: string;
   timestamp?: string;
   cwd?: string;
+  gitBranch?: string;
   isMeta?: boolean;
+  isSidechain?: boolean;
   customTitle?: string;
   title?: string;
-  message?: { role?: string; content?: unknown };
+  attachment?: { type?: string };
+  message?: {
+    role?: string;
+    content?: unknown;
+    model?: string;
+    usage?: Record<string, number>;
+  };
 }
 
 /** `tool_result.content` is either a string or a list of text blocks. */
@@ -105,6 +119,8 @@ export const claudeAdapter: ProviderAdapter = {
 
   async parse(candidate: SessionCandidate): Promise<NormalizedSession> {
     const turns: TurnEvent[] = [];
+    const stats = emptyProviderStats();
+    const tokens: TokenUsage = { input: 0, output: 0, total: 0 };
     let title: string | undefined;
     let firstPrompt: string | undefined;
     let workspace: string | undefined;
@@ -124,6 +140,23 @@ export const claudeAdapter: ProviderAdapter = {
       }
       if (entry.type === 'custom-title' && entry.customTitle) title = entry.customTitle;
       if (entry.type === 'ai-title' && typeof entry.title === 'string') title ??= entry.title;
+
+      if (entry.gitBranch && !stats.branches.includes(entry.gitBranch)) stats.branches.push(entry.gitBranch);
+      const model = entry.message?.model;
+      if (model && !stats.models.includes(model)) stats.models.push(model);
+      const usage = entry.message?.usage;
+      if (usage) {
+        tokens.input += (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+        tokens.output += usage.output_tokens ?? 0;
+      }
+      if (entry.isSidechain) stats.extras.sidechain = (stats.extras.sidechain ?? 0) + 1;
+      if (entry.type === 'attachment' && entry.attachment?.type) {
+        const key = `attachment:${entry.attachment.type}`;
+        stats.extras[key] = (stats.extras[key] ?? 0) + 1;
+      }
+      if (entry.type === 'file-history-snapshot') {
+        stats.extras.fileSnapshots = (stats.extras.fileSnapshots ?? 0) + 1;
+      }
       if (entry.isMeta) continue;
 
       const timestamp = entry.timestamp;
@@ -181,6 +214,12 @@ export const claudeAdapter: ProviderAdapter = {
       },
       turns,
       artifacts: [],
+      stats: {
+        ...stats,
+        ...(tokens.input || tokens.output
+          ? { tokens: { ...tokens, total: tokens.input + tokens.output } }
+          : {}),
+      },
     };
   },
 };

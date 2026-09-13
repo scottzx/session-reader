@@ -1,7 +1,18 @@
 export type {
   AgentProvider,
+  BackgroundTask,
   DigestFocus,
+  FileChange,
   FileTouch,
+  GitCommit,
+  ProviderStats,
+  SessionOverview,
+  SessionStats,
+  TokenUsage,
+  TurnDetail,
+  TurnSummary,
+  UserTurnKind,
+  UserTurnNote,
   NormalizedSession,
   SessionArtifact,
   SessionDigest,
@@ -27,14 +38,8 @@ export {
 } from './resolver.js';
 
 export { distillSession, editedFiles, shellCommand } from './distiller.js';
-export {
-  buildHandoff,
-  type HandoffAnchor,
-  type HandoffBrief,
-  type HandoffCorrection,
-  type HandoffOptions,
-  type OpenThread,
-} from './handoff.js';
+export { buildOverview, classifyUserTurn } from './overview.js';
+export { eventDetail, summarizeTurns, turnDetail, type EventDetail } from './turns.js';
 export {
   fileWrites,
   rawCommand,
