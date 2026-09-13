@@ -106,3 +106,20 @@ export {
   PARSER_VERSION,
   SCHEMA_VERSION,
 } from './store/schema.js';
+export {
+  SKILL_NAME,
+  agentTargets,
+  bundledSkillDir,
+  describeState,
+  installSkill,
+  skillStatus,
+  uninstallSkill,
+  type AgentStatus,
+  type AgentTarget,
+  type EntryState,
+  type InstallMode,
+  type InstallOptions,
+  type InstallResult,
+  type SkillAgent,
+  type UninstallResult,
+} from './skill.js';

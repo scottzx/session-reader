@@ -26,6 +26,8 @@ const USAGE = `1session — cross-agent session Read Plane
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session index [<session-id>] [--all] [--scope <path>|cwd|global] [--force] [--since 30d]  建立/刷新索引
   1session graph <session-id> [--json]                 会话之间的引用关系
+  1session skill install|status|uninstall [--agent claude,codex,antigravity]
+                          [--copy] [--force] [--dry-run] [--json]  装到三家智能体的 skills 目录
   1session search <query> [--scope <path>|cwd|global] [--since 24h] [--limit n] [--provider name]
                           [--kind user,assistant,thinking,tool_call,tool_result]
                           [--regex] [--case] [--context n] [--max-hits n] [--json]
@@ -47,6 +49,7 @@ interface Args {
 /** Flags that never take a value, so they cannot swallow a positional. */
 const BOOLEAN_FLAGS = new Set([
   'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index', 'global',
+  'copy', 'dry-run',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -516,6 +519,55 @@ async function main(): Promise<void> {
           : `${row.id} 尚无关系边（没有任何会话通过 1session 查过它，它也没查过别人）`,
       );
       break;
+    }
+
+    case 'skill': {
+      const {
+        describeState, installSkill, skillStatus, uninstallSkill, bundledSkillDir,
+      } = await import('../src/skill.js');
+      const agents = str(flags.agent)
+        ?.split(',')
+        .map((name) => name.trim())
+        .filter(Boolean) as ('claude' | 'codex' | 'antigravity')[] | undefined;
+      const options = {
+        ...(agents?.length ? { agents } : {}),
+        mode: flags.copy === true ? ('copy' as const) : ('link' as const),
+        force: flags.force === true,
+        dryRun: flags['dry-run'] === true,
+      };
+      const action = positional[0] ?? 'status';
+
+      if (action === 'status') {
+        const rows = skillStatus();
+        print(
+          json,
+          { source: bundledSkillDir(), agents: rows },
+          [
+            `skill 源：${bundledSkillDir()}`,
+            '',
+            ...rows.map(
+              (row) =>
+                `  ${row.agent.padEnd(12)} ${row.installed ? '✓' : '·'} ${describeState(row.state).padEnd(28)} ${row.entryPath}`,
+            ),
+            '',
+            '> ✓ = 该智能体已安装。1session skill install 装入，--copy 用拷贝代替链接。',
+          ].join('\n'),
+        );
+        break;
+      }
+      if (action === 'install' || action === 'uninstall') {
+        const results =
+          action === 'install' ? await installSkill(options) : await uninstallSkill(options);
+        print(
+          json,
+          results,
+          results
+            .map((row) => `  ${row.agent.padEnd(12)} ${row.action.padEnd(10)} ${row.note}`)
+            .join('\n') || '  无目标',
+        );
+        break;
+      }
+      throw new Error(`unknown skill action: ${action}（install | status | uninstall）`);
     }
 
     default:
