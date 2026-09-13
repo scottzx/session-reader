@@ -25,7 +25,7 @@ const USAGE = `1session — cross-agent session Read Plane
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session index [<session-id>] [--all] [--force] [--since 30d]  建立/刷新索引
   1session graph <session-id> [--json]                 会话之间的引用关系
-  1session search <query> [--workspace path] [--since 24h] [--limit n] [--scan n] [--provider name]
+  1session search <query> [--workspace path] [--since 24h] [--limit n] [--provider name]
                           [--kind user,assistant,thinking,tool_call,tool_result]
                           [--regex] [--case] [--context n] [--max-hits n] [--json]
 
@@ -364,7 +364,6 @@ async function main(): Promise<void> {
         caseSensitive: flags.case === true,
         context: num(flags.context),
         maxPerSession: num(flags['max-hits']),
-        scan: num(flags.scan),
         useIndex,
       });
       const total = hits.reduce((sum, hit) => sum + hit.totalMatches, 0);

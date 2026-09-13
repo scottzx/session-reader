@@ -641,3 +641,68 @@ test('re-deriving edges does not inflate the evidence count', async (t) => {
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Search query layer
+// ---------------------------------------------------------------------------
+
+import { mandatoryLiteral, planQuery } from '../src/search.js';
+
+test('mandatoryLiteral only claims substrings every match must contain', () => {
+  assert.equal(mandatoryLiteral('src/ledger\\.ts'), 'src/ledger.ts');
+  assert.equal(mandatoryLiteral('src/.*ledger'), 'ledger');
+  assert.equal(mandatoryLiteral('sess+ion_read'), 'ion_read');
+  assert.equal(mandatoryLiteral('ledger[._]ts'), 'ledger');
+
+  // Anything optional must not be claimed: `c` can be absent from a match.
+  assert.equal(mandatoryLiteral('abc?def'), 'def');
+  assert.equal(mandatoryLiteral('abc*def'), 'def');
+  assert.equal(mandatoryLiteral('abc{0,2}def'), 'def');
+
+  // Alternation and groups make nothing provably mandatory — give up instead
+  // of guessing, or the prefilter starts hiding rows.
+  assert.equal(mandatoryLiteral('(foo|bar)baz'), undefined);
+  assert.equal(mandatoryLiteral('foo|bar'), undefined);
+  assert.equal(mandatoryLiteral('(abc)?def'), undefined);
+  assert.equal(mandatoryLiteral('\\d+\\.\\d+'), undefined);
+});
+
+test('planQuery folds case only where SQLite and the matcher agree', () => {
+  // `gi` without `u` folds ASCII only, which is exactly what SQLite lower() does.
+  assert.deepEqual(planQuery('Deploy'), { literal: 'deploy', fold: true });
+  assert.deepEqual(planQuery('Deploy', { caseSensitive: true }), { literal: 'Deploy' });
+  // CJK has no case, so it is compared verbatim on both sides.
+  assert.deepEqual(planQuery('会话'), { literal: '会话' });
+  // Mixed: keep the caseless run, never a folded non-ASCII string.
+  assert.deepEqual(planQuery('会话Deploy'), { literal: '会话' });
+  // Too short or newline-spanning literals cannot prefilter safely.
+  assert.deepEqual(planQuery('x'), {});
+  assert.deepEqual(planQuery('a\nb'), {});
+});
+
+test('indexed search and --no-index agree hit for hit', async (t) => {
+  const shapes: [string, Record<string, unknown>][] = [
+    ['session', { limit: 20 }],
+    ['会话', { limit: 20 }],
+    ['ledger\\.(ts)', { regex: true, limit: 20 }],
+    ['(ledger|resolver)\\.ts', { regex: true, limit: 20 }],
+  ];
+  let compared = 0;
+  for (const [query, options] of shapes) {
+    const indexed = await searchSessions(query, { ...options, since: '30d' });
+    const direct = await searchSessions(query, { ...options, since: '30d', useIndex: false });
+    if (!indexed.length && !direct.length) continue;
+    const shape = (hits: Awaited<ReturnType<typeof searchSessions>>) =>
+      hits.map((hit) => ({
+        id: hit.session.id,
+        total: hit.totalMatches,
+        matches: hit.matches.map((match) => `${match.index}|${match.kind}|${match.excerpt}`),
+      }));
+    // Same sessions, same counts, same excerpts, same order. The SQL layer is
+    // allowed to narrow the candidates, never to change the answer.
+    assert.deepEqual(shape(indexed), shape(direct), `query ${query} diverged`);
+    compared++;
+  }
+  if (!compared) return t.skip('no local sessions matched');
+  t.diagnostic(`compared ${compared} query shape(s)`);
+});

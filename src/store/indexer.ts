@@ -28,6 +28,13 @@ export interface IndexOptions {
   edges?: boolean;
 }
 
+export interface RefreshResult {
+  id: string;
+  action: IndexAction;
+  /** Present only when the work required materializing it anyway. */
+  session?: NormalizedSession;
+}
+
 /**
  * Brings one session's index up to date and returns it.
  *
@@ -40,6 +47,22 @@ export async function indexSession(
   handle: IndexHandle,
   options: IndexOptions = {},
 ): Promise<IndexResult> {
+  const result = await refreshSession(db, handle, options);
+  const session = result.session ?? readSession(db, sessionRow(db, result.id)!);
+  return { id: result.id, action: result.action, session };
+}
+
+/**
+ * The same work without materializing the session.
+ *
+ * A caller that only needs the index to be current — search, for one — pays a
+ * stat and a 64KB read per session instead of rebuilding every event object.
+ */
+export async function refreshSession(
+  db: DatabaseSync,
+  handle: IndexHandle,
+  options: IndexOptions = {},
+): Promise<RefreshResult> {
   const { adapter, candidate } = handle;
   const id = canonicalId(adapter.provider, candidate.id);
   const aux = await adapter.auxFingerprint?.(candidate);
@@ -61,6 +84,14 @@ export async function indexSession(
     deriveFacts(db, id, session);
     if (options.edges !== false) deriveEdges(db, id, session);
     return { id, action: 'indexed', session };
+  }
+
+  // Nothing to redo: the caller gets an id and no object was ever built.
+  if (
+    row.extractor_version === EXTRACTOR_VERSION &&
+    (options.edges === false || row.edge_version === EDGE_VERSION)
+  ) {
+    return { id, action: 'reused' };
   }
 
   const session = readSession(db, row);

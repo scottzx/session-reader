@@ -36,7 +36,7 @@ npm run build && node dist/bin/1session.js <command>
 | `1session commands <id> [--failed] [--host h] [--turn n] [--json]` | 命令账本：exit_code / 耗时 / cwd |
 | `1session files <id> [--group project\|runtime\|log\|all] [--json]` | 文件账本，按项目 / 运行态 / 日志分组 |
 | `1session errors <id> [--json]` | 失败命令，带 stderr 与"同前缀命令后续是否成功" |
-| `1session search <query> [--workspace p] [--since 24h] [--limit n] [--scan n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段 |
+| `1session search <query> [--workspace p] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段 |
 | `1session index [<id>] [--all] [--force] [--since 30d]` | 建立 / 刷新索引；`--all` 全库回填 |
 | `1session graph <id> [--json]`（别名 `related`） | 会话之间的引用关系 + 每条边的证据 |
 
@@ -204,7 +204,7 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 - **发现是分层的**：先按文件 mtime 排序候选（只 `stat`），再按需读文件头填充元数据，最后才整篇解析。`list` 与 `workspace` 通常在 0.5 秒内返回。
 - **`--since` 的精度**：预筛用文件 mtime（可能因同步/复制而失真），`--digest` 会在整篇解析后用真实轮次时间戳再过滤一次。
 - **Claude 标题**：`list` 只读文件头，标题取首个用户请求；`inspect`/`digest`/`workspace --digest` 会整篇解析，此时优先使用会话自身的 `custom-title` / `ai-title`。
-- **`search` 默认覆盖全库**。它匹配 `text` + 工具结果 + 工具参数 JSON。早先它受发现层的扫描预算限制，一次查询其实只看最近 ~60 个会话／每个智能体，却把结果报告得像查全了——这是"静默不全"，比慢危险。现在走索引，`--scan` 默认无上限，`--limit` 只管返回几个会话。默认每个会话最多列 5 处命中，`totalMatches` 给的是真实总数。
+- **`search` 没有扫描上限**。早先它受发现层的扫描预算限制，一次查询其实只看最近 ~60 个会话／每个智能体，却把结果报告得像查全了——"静默不全"比慢危险。现在 `--limit` 只管返回几个会话，不再兼任"最多检查几个会话"；满足 `--workspace` / `--since` / `--provider` 的会话一个不漏。默认每个会话最多列 5 处命中，`totalMatches` 给的是真实总数。
 - **文件归属分两级置信度**。`explicit` 来自显式写工具（`Write`/`Edit`/`write_to_file`/`replace_file_content`/`apply_patch`）；`inferred` 是从 shell 命令里解析出来的（`>`/`>>`、`tee`、`cp`/`mv`、`scp`、`sed -i`、python 的 `write_text`/`open(w)`），在展示时标 `~`。没有它，纯靠 shell 干活的智能体（如 codex 全程走 `exec` 沙箱）会显示成"一个文件都没改过"。这是启发式，可能漏也可能多报。
 - **轮次边界按"其后最近开始的那一轮"归属**。`task_started` 总比该轮第一个事件早几秒（12:41:06 vs 12:41:13），按"落在窗口内"匹配会全部落空。
 - **统计优先用各家自己记的结构化数据，而不是我们推断**。codex 的 `event_msg/item_completed` 里有 `FileChange`（带 diff）、`CommandExecution`（带 pid/cwd）、`task_started/task_complete`（轮次边界 + 耗时）与 `token_usage_record`；claude 每条都带 `gitBranch`/`model`/`usage`；antigravity 的产物、上传、后台任务分别在 brain 目录、`.user_uploaded/` 与 `.system_generated/{tasks,messages}/`。统计里 `fileChangeSource` 会标明这次是 `provider` 还是 `inferred`。
@@ -244,9 +244,57 @@ L3  会话关系  session_edges / edge_evidence
 diff <(1session overview <id>) <(1session overview <id> --no-index)
 ```
 
+### 检索：SQL 出候选，正则下判决
+
+`search` 不再把 622 个会话还原成对象——那一步比其余所有环节加起来还贵（实测 1.33s）。现在是 **SQL 预筛 + 原有正则裁决**：
+
+```
+Query
+  ↓  planQuery：能不能证明出一个"必然出现"的子串？
+SQL  instr() 预筛（外加 workspace / kind / since 下推）
+  ↓
+现有 regex matcher ← 唯一的语义权威
+Hit
+```
+
+分三档：
+
+| 查询 | 处理 |
+| --- | --- |
+| 字面量 `src/ledger.ts`、`会话` | 直接 `instr()` 预筛 |
+| 正则且能安全抽出必然子串 `src/.*ledger\.ts` → `ledger` | `instr()` 预筛 + 正则裁决 |
+| 抽不出来 `(foo\|bar)`、`\d+\.\d+` | 不预筛，流式扫行 + 正则裁决 |
+
+**抽取器故意保守**：出现 `|` 或任何分组就直接放弃；`abc?def` 只敢claim `def`（`c` 可能不存在）。宁可全表扫，也不要一个"看起来搜过了其实漏了"的答案——这和截断上限是同一类错误。
+
+两个必须对齐的细节，都有测试钉住：
+
+- **大小写折叠**。`gi` 正则在非 `u` 模式下只折叠 ASCII，SQLite 的 `lower()` 恰好也只折叠 ASCII，所以纯 ASCII 字面量可以两边一起折。非 ASCII 则取最长的"无大小写"字符串（CJK 折叠是恒等），用大小写敏感的 `instr` 比。
+- **预筛按列比，不按拼好的 haystack 比**。匹配串一旦跨列就会漏，所以含换行的字面量直接不预筛。
+
+中文不需要分词：`instr` 是子串匹配，搜「会话」在「跨会话检索」里天然能中——这正是 FTS5 做不到的（`unicode61` 把整段当一个 token，`trigram` 要求 ≥3 字符，两者搜「会话」都是 0 命中）。Agent transcript 里大量内容是 session id / 路径 / CLI flag / 变量名 / commit hash，子串语义本来就比 token 语义更贴合。
+
+本机实测（622 个会话）：
+
+| 查询 | 改造前 | 现在 |
+| --- | --- | --- |
+| `deploy`（1631 命中 / 239 会话） | 1.62s※ | 0.55s |
+| `会话`（2336 命中 / 263 会话） | 1.14s※ | 0.39s |
+| `src/ledger.ts` | 1.1s※ | 0.46s |
+
+※ 改造前那几个数字还只覆盖了 ≤180 个会话。现在是全库，而且 `search` 与 `search --no-index` 的**会话集合 / 命中数 / excerpt / 顺序逐项相同**（10 种查询形态验证过）。
+
 ### 会话关系图（L3）
 
 边从真实工具调用里长出来，不猜。B 跑了 `1session overview A`，就记一条 `B --references--> A`：
+
+结构化的问题不要走全文检索——L2/L3 有确定答案：
+
+| 问题 | 该查 |
+| --- | --- |
+| 哪些会话文本里**提到过** `src/ledger.ts` | `search` |
+| 哪些会话**确实动过**它 | `file_ops`（`1session files`） |
+| 谁引用过 `01a0907c` | `session_edges`（`1session graph`） |
 
 ```
 $ 1session graph ca8325e1
