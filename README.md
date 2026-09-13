@@ -32,6 +32,10 @@ npm run build && node dist/bin/1session.js <command>
 | `1session turn <session-id> <n> [--event k] [--json]` | **第 3 层**：展开某一轮的全部事件；`--event` 定位单次工具调用，输出完整参数与**未截断**结果 |
 | `1session digest <session-id> [--focus marketing\|review\|full] [--json]` | 单会话蒸馏：目标、改动文件、命令、关键节点 |
 | `1session workspace [path] [--since 24h] [--limit n] [--digest] [--focus f] [--json]` | **按 pwd 跨智能体聚合**（默认 `.`）；带 `--digest` 输出统一故事线 |
+| `1session jobs <id> [--json]` | 异步作业账本：状态 + **证据** + pid / host / log |
+| `1session commands <id> [--failed] [--host h] [--turn n] [--json]` | 命令账本：exit_code / 耗时 / cwd |
+| `1session files <id> [--group project\|runtime\|log\|all] [--json]` | 文件账本，按项目 / 运行态 / 日志分组 |
+| `1session errors <id> [--json]` | 失败命令，带 stderr 与"同前缀命令后续是否成功" |
 | `1session search <query> [--workspace p] [--since 24h] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段 |
 
 `<session-id>` 支持完整 id、id 前缀（≥6 位）或原始文件路径。
@@ -128,6 +132,40 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 `unifiedTimeline`（按时间排序的跨智能体节点）/ `fileAttribution`（文件 → 谁在什么时候改的）/ `markdown`。
 适合直接喂给下游做小红书笔记、PRD、周报与 changelog，也可零成本包成 DeepSeek Harness（Cordis）插件或 MCP server。
 
+## 事实分层：这个模块只做前两层
+
+| 层 | 内容 | 例子 |
+| --- | --- | --- |
+| **L1 源文件显式字段** | 各家自己记好的结构化数据，零猜测 | codex `CommandExecution` 的 336 条命令（带 `exit_code`/`stderr`/`pid`/`duration`）、`FileChange`、token 记账；claude 的 `gitBranch`/`model`/`usage`；antigravity 的产物 metadata、上传、任务回执 |
+| **L2 确定性规则派生** | 纯规则，可重复、可验证 | antigravity 打印的 `The command exited with code N` → 211 条 exit_code；`ssh user@host` → 主机；`git commit -m` + `[branch sha]` 回显 → 提交；路径按项目/运行态/日志分组；每个资源的首见/末见轮次 |
+| **L3 语义解释** | **本模块不做** | 当前主线、目标漂移、已完成/阻塞/下一步、决策归纳、坑的因果链、资源的 primary/legacy 角色 |
+
+所以 overview 回答的是"**最后一条成功命令是什么**"，而不是"当前阻塞是什么"；给出"末态事实"而不是"进度判断"。语义层留白处会显式写明 `属语义层，本阶段不生成`，不假装。
+
+同样的原则贯穿每一处：**没有证据就不断言**。异步作业只在有完成回执时标 `completed`，否则一律 `unknown` 并写明依据；没有打印 exit code 的命令结果，`exitCode` 就是空，绝不补成 0。
+
+## 轮次完成状态
+
+第二层每一轮带一个**有证据的状态**——只说这一轮有没有收尾，不说做成了什么：
+
+| 标记 | 状态 | 判据 |
+| --- | --- | --- |
+| `✓` | completed | 有原生 `task_complete`，或以 assistant 收尾且下一轮不是催促 |
+| `⚠` | unfinished | 有 `task_started` 但没有配对的 `task_complete` |
+| `↻` | nudged | 下一轮是纯推进指令（`继续`/`continue`），记连续次数 |
+| `✂` | interrupted | 轮内有 `tool_call` 却没有对应结果 |
+| `⊘` | no_response | 除用户消息外没有任何助理事件 |
+| `✗` | failed_tail | 以 `exit ≠ 0` 收尾且其后无 assistant |
+
+多条证据可以同时命中，此时置信度更高。实例：
+
+```text
+⚠ T 9 ... [unfinished ×2]
+    ! provider 记录了 task_started 但没有配对的 task_complete（turn 01a095f4-5b27）；下一轮是纯推进指令，连续 2 次（"contin"）
+```
+
+这一轮切换到 Sol-H3-Spark 没跑完 → 用户打了 `contin` → 又打 `continue`。**两条独立证据指向同一结论，不需要模型参与。**
+
 ## 设计取舍
 
 - **发现是分层的**：先按文件 mtime 排序候选（只 `stat`），再按需读文件头填充元数据，最后才整篇解析。`list` 与 `workspace` 通常在 0.5 秒内返回。
@@ -135,6 +173,7 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 - **Claude 标题**：`list` 只读文件头，标题取首个用户请求；`inspect`/`digest`/`workspace --digest` 会整篇解析，此时优先使用会话自身的 `custom-title` / `ai-title`。
 - **`search` 会整篇解析候选会话**（匹配的是 `text` + 工具结果 + 工具参数 JSON），所以先用 `--workspace` / `--since` / `--provider` 收窄，再放大 `--limit`（默认最多扫 30 个会话）。默认每个会话最多列 5 处命中，`totalMatches` 给的是真实总数。
 - **文件归属分两级置信度**。`explicit` 来自显式写工具（`Write`/`Edit`/`write_to_file`/`replace_file_content`/`apply_patch`）；`inferred` 是从 shell 命令里解析出来的（`>`/`>>`、`tee`、`cp`/`mv`、`scp`、`sed -i`、python 的 `write_text`/`open(w)`），在展示时标 `~`。没有它，纯靠 shell 干活的智能体（如 codex 全程走 `exec` 沙箱）会显示成"一个文件都没改过"。这是启发式，可能漏也可能多报。
+- **轮次边界按"其后最近开始的那一轮"归属**。`task_started` 总比该轮第一个事件早几秒（12:41:06 vs 12:41:13），按"落在窗口内"匹配会全部落空。
 - **统计优先用各家自己记的结构化数据，而不是我们推断**。codex 的 `event_msg/item_completed` 里有 `FileChange`（带 diff）、`CommandExecution`（带 pid/cwd）、`task_started/task_complete`（轮次边界 + 耗时）与 `token_usage_record`；claude 每条都带 `gitBranch`/`model`/`usage`；antigravity 的产物、上传、后台任务分别在 brain 目录、`.user_uploaded/` 与 `.system_generated/{tasks,messages}/`。统计里 `fileChangeSource` 会标明这次是 `provider` 还是 `inferred`。
 - **轮次边界按时间对齐，不按下标**。codex 原生边界（12 个）比用户消息（15 条）少，按下标取耗时会错位。
 - **远程写会带 host**。命令形如 `ssh user@host '…'` 时，其中的写标记为 `host:/path`；但 `scp remote:src local_dst` 是往本地写，host 只认目标端自己写明的那个。

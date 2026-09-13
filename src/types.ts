@@ -34,6 +34,9 @@ export interface TurnEvent {
   truncated?: boolean;
   /** OS process id, when the provider records one for a command. */
   processId?: string;
+  /** Shell exit status, when the provider records or prints one. */
+  exitCode?: number;
+  durationMs?: number;
 }
 
 /** A file the agent produced alongside the session (plans, reports, images). */
@@ -70,10 +73,59 @@ export interface TokenUsage {
 }
 
 export interface TurnBoundary {
+  /** Provider turn id — boundaries must be paired by id, never by position. */
+  id?: string;
   startedAt?: string;
   endedAt?: string;
   durationMs?: number;
   lastMessage?: string;
+  /** A start with no matching completion means the turn never wrapped up. */
+  completed: boolean;
+}
+
+/** One shell command with whatever the provider actually recorded about it. */
+export interface CommandRecord {
+  eventIndex: number;
+  turn: number;
+  command: string;
+  host?: string;
+  cwd?: string;
+  exitCode?: number;
+  durationMs?: number;
+  pid?: string;
+  stderr?: string;
+  timestamp?: string;
+  /** Where the facts came from: the provider's own record, or our parsing. */
+  source: 'provider' | 'parsed';
+  /** Errors only: a later command with the same prefix exited zero. */
+  laterSucceeded?: boolean;
+}
+
+export type JobStatus = 'completed' | 'failed' | 'running' | 'unknown';
+
+export interface AsyncJob {
+  id: string;
+  command?: string;
+  pid?: string;
+  host?: string;
+  log?: string;
+  startedAt?: string;
+  discoveredFrom?: number;
+  status: JobStatus;
+  /** Why we claim that status. Never empty for anything but `unknown`. */
+  evidence: string[];
+}
+
+export type FileGroup = 'project' | 'runtime' | 'log';
+
+export interface FileRecord {
+  path: string;
+  host?: string;
+  operation: string;
+  turn: number;
+  timestamp?: string;
+  confidence: 'explicit' | 'inferred';
+  group: FileGroup;
 }
 
 /** Structured facts a provider records natively — never inferred by us. */
@@ -88,6 +140,8 @@ export interface ProviderStats {
   backgroundTasks: BackgroundTask[];
   /** Provider-declared turn boundaries (codex task_started/task_complete). */
   turnBoundaries: TurnBoundary[];
+  /** Command ledger, when the provider records commands itself. */
+  commands: CommandRecord[];
   /** Counts of anything else worth surfacing: images viewed, compactions… */
   extras: Record<string, number>;
 }
@@ -100,6 +154,7 @@ export function emptyProviderStats(): ProviderStats {
     uploads: [],
     backgroundTasks: [],
     turnBoundaries: [],
+    commands: [],
     extras: {},
   };
 }
@@ -180,7 +235,8 @@ export interface SessionStats {
   tokens?: TokenUsage;
   artifacts: SessionArtifact[];
   uploads: { name: string; path: string; sizeBytes?: number }[];
-  backgroundTasks: BackgroundTask[];
+  jobs: AsyncJob[];
+  jobCounts: Record<JobStatus, number>;
   extras: Record<string, number>;
 }
 
@@ -199,15 +255,33 @@ export interface SessionOverview {
   corrections: UserTurnNote[];
   nudges: number;
   pastes: number;
-  anchors: { hosts: string[]; paths: { path: string; hits: number; kind: 'dir' | 'file' }[] };
+  anchors: {
+    hosts: string[];
+    /** `firstTurn`/`lastTurn` express recency — not a semantic role. */
+    paths: { path: string; hits: number; kind: 'dir' | 'file'; firstTurn: number; lastTurn: number }[];
+  };
   writes: { path: string; confidence: 'explicit' | 'inferred'; via: string; host?: string }[];
   pitfalls: string[];
   lastWord: string;
   markdown: string;
 }
 
+export type TurnStatus =
+  | 'completed'
+  | 'unfinished'
+  | 'nudged'
+  | 'interrupted'
+  | 'no_response'
+  | 'failed_tail';
+
 export interface TurnSummary {
   no: number;
+  /** Whether the turn wrapped up — never a claim about what it achieved. */
+  status: TurnStatus;
+  /** Every signal that fired. Empty only when the status is `completed`. */
+  evidence: string[];
+  /** How many pure "keep going" messages followed this turn. */
+  nudgeCount: number;
   startedAt?: string;
   endedAt?: string;
   durationMs?: number;

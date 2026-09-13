@@ -4,11 +4,12 @@ import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { buildOverview } from '../src/overview.js';
 import { eventDetail, summarizeTurns, turnDetail } from '../src/turns.js';
+import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { listRecentSessions, resolveSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
-import type { DigestFocus, NormalizedSession, TurnKind } from '../src/types.js';
+import type { DigestFocus, FileGroup, NormalizedSession, TurnKind } from '../src/types.js';
 
 const USAGE = `1session — cross-agent session Read Plane
 
@@ -16,6 +17,10 @@ const USAGE = `1session — cross-agent session Read Plane
   1session overview <session-id> [--json]              第 1 层：会话概要
   1session turns <session-id> [--json]                 第 2 层：逐轮概要
   1session turn <session-id> <n> [--event <k>] [--json] 第 3 层：单轮 / 单次工具调用明细
+  1session jobs <session-id> [--json]                  异步作业账本
+  1session commands <session-id> [--failed] [--host h] [--turn n] [--json]
+  1session files <session-id> [--group project|runtime|log|all] [--json]
+  1session errors <session-id> [--json]
   1session digest <session-id> [--focus marketing|review|full] [--json]
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session search <query> [--workspace path] [--since 24h] [--limit n] [--provider name]
@@ -54,6 +59,16 @@ function parseArgs(argv: string[]): Args {
   }
   return { command, positional, flags };
 }
+
+
+const TURN_MARK: Record<string, string> = {
+  completed: '✓',
+  unfinished: '⚠',
+  nudged: '↻',
+  interrupted: '✂',
+  no_response: '⊘',
+  failed_tail: '✗',
+};
 
 const str = (value: string | boolean | undefined): string | undefined =>
   typeof value === 'string' ? value : undefined;
@@ -117,6 +132,99 @@ async function main(): Promise<void> {
       break;
     }
 
+    case 'jobs': {
+      const session = await load(positional[0]);
+      const jobs = jobLedger(session);
+      print(
+        json,
+        jobs,
+        jobs.length
+          ? jobs
+              .map(
+                (job) =>
+                  `[${job.status}] ${job.log ?? job.id}${job.pid ? ` pid ${job.pid}` : ''}` +
+                  `${job.host ? ` @${job.host}` : ''}` +
+                  `${job.startedAt ? `  ${job.startedAt.slice(0, 19)}` : ''}` +
+                  `\n    ${job.evidence.join('；')}` +
+                  `${job.command ? `\n    ${oneLine(job.command, 150)}` : ''}`,
+              )
+              .join('\n')
+          : '（该会话没有发现后台作业）',
+      );
+      break;
+    }
+
+    case 'commands': {
+      const session = await load(positional[0]);
+      const host = str(flags.host);
+      const turn = num(flags.turn);
+      const records = commandLedger(session).filter(
+        (record) =>
+          (flags.failed !== true || (record.exitCode ?? 0) !== 0) &&
+          (host === undefined || record.host === host) &&
+          (turn === undefined || record.turn === turn),
+      );
+      print(
+        json,
+        records,
+        [
+          `${records.length} 条命令（来源：${[...new Set(records.map((r) => r.source))].join('/') || '-'}）`,
+          '',
+          ...records.map(
+            (record) =>
+              `T${String(record.turn).padStart(2, ' ')} #${String(record.eventIndex).padStart(4, ' ')} ` +
+              `exit ${String(record.exitCode ?? '?').padStart(3, ' ')}` +
+              `${record.durationMs ? ` ${(record.durationMs / 1000).toFixed(1)}s` : ''}` +
+              `${record.host ? ` @${record.host}` : ''}  ${oneLine(record.command, 130)}`,
+          ),
+        ].join('\n'),
+      );
+      break;
+    }
+
+    case 'files': {
+      const session = await load(positional[0]);
+      const wanted = str(flags.group) as FileGroup | 'all' | undefined;
+      const records = fileLedger(session).filter((record) =>
+        wanted === 'all' || wanted === undefined ? record.group !== 'log' : record.group === wanted,
+      );
+      print(
+        json,
+        records,
+        [
+          `${records.length} 个文件${wanted ? `（group=${wanted}）` : '（默认不含 log，用 --group log 查看）'}`,
+          '',
+          ...records.map(
+            (record) =>
+              `[${record.group}] T${record.turn} ${displayPath(record, session.ref.workspace)}` +
+              `${record.confidence === 'inferred' ? ` ~${record.operation}` : ''}`,
+          ),
+        ].join('\n'),
+      );
+      break;
+    }
+
+    case 'errors': {
+      const session = await load(positional[0]);
+      const records = errorLedger(session);
+      print(
+        json,
+        records,
+        [
+          `${records.length} 条失败命令`,
+          '',
+          ...records.map(
+            (record) =>
+              `T${record.turn} #${record.eventIndex} exit ${record.exitCode ?? '?'}` +
+              `${record.laterSucceeded ? '  → 同前缀命令后续成功过' : ''}` +
+              `\n    ${oneLine(record.command, 150)}` +
+              `${record.stderr ? `\n    ${oneLine(record.stderr, 150)}` : ''}`,
+          ),
+        ].join('\n'),
+      );
+      break;
+    }
+
     case 'digest': {
       const session = await load(positional[0]);
       const digest = distillSession(session, { focus: focusOf(flags.focus) });
@@ -165,10 +273,12 @@ async function main(): Promise<void> {
           `${summaries.length} 轮 · 共 ${session.turns.length} 个事件`,
           '',
           ...summaries.flatMap((turn) => [
-            `T${String(turn.no).padStart(2, ' ')} ${turn.startedAt?.slice(0, 19) ?? '?'}` +
+            `${TURN_MARK[turn.status] ?? '·'} T${String(turn.no).padStart(2, ' ')} ${turn.startedAt?.slice(0, 19) ?? '?'}` +
               `${turn.durationMs ? ` (${Math.round(turn.durationMs / 1000)}s)` : ''}` +
               `  事件 ${turn.events[0]}–${turn.events[1]}` +
-              `  文件 ${turn.files.length} · 命令 ${turn.commands} · 失败 ${turn.errors}`,
+              `  文件 ${turn.files.length} · 命令 ${turn.commands} · 失败 ${turn.errors}` +
+              `${turn.status === 'completed' ? '' : `  [${turn.status}${turn.nudgeCount > 1 ? ` ×${turn.nudgeCount}` : ''}]`}`,
+            ...(turn.evidence.length ? [`    ! ${turn.evidence.join('；')}`] : []),
             `    ▸ ${turn.prompt}`,
             ...(turn.outcome ? [`    ◂ ${turn.outcome}`] : []),
           ]),

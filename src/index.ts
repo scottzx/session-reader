@@ -9,7 +9,13 @@ export type {
   SessionOverview,
   SessionStats,
   TokenUsage,
+  AsyncJob,
+  CommandRecord,
+  FileGroup,
+  FileRecord,
+  JobStatus,
   TurnDetail,
+  TurnStatus,
   TurnSummary,
   UserTurnKind,
   UserTurnNote,
@@ -38,7 +44,16 @@ export {
 } from './resolver.js';
 
 export { distillSession, editedFiles, shellCommand } from './distiller.js';
-export { buildOverview, classifyUserTurn } from './overview.js';
+export { buildOverview } from './overview.js';
+export { classifyUserTurn } from './classify.js';
+export {
+  commandLedger,
+  displayPath,
+  errorLedger,
+  fileLedger,
+  jobCounts,
+  jobLedger,
+} from './ledger.js';
 export { eventDetail, summarizeTurns, turnDetail, type EventDetail } from './turns.js';
 export {
   fileWrites,

@@ -7,6 +7,7 @@ import { looksLikeInstructions, oneLine, stripPromptEnvelope } from '../util/tex
 import { toolArgsOf, type ProviderAdapter, type SessionCandidate } from './provider.js';
 import {
   emptyProviderStats,
+  type CommandRecord,
   type FileChange,
   type NormalizedSession,
   type ProviderStats,
@@ -33,9 +34,23 @@ interface ContentBlock {
 interface CompletedItem {
   type?: string;
   id?: string;
+  kind?: string;
+  query?: string;
   process_id?: string;
   command?: string[] | string;
+  cwd?: string;
+  exit_code?: number;
+  stderr?: string;
+  duration?: { secs?: number; nanos?: number };
   changes?: Record<string, { type?: string; content?: string }>;
+}
+
+const SSH_HOST = /\b[\w.-]+@((?:\d{1,3}(?:\.\d{1,3}){3})|(?:[\w-]+(?:\.[\w-]+)+))/;
+
+function durationOf(duration: CompletedItem['duration']): number | undefined {
+  if (!duration) return undefined;
+  const ms = (duration.secs ?? 0) * 1000 + (duration.nanos ?? 0) / 1e6;
+  return ms > 0 ? Math.round(ms) : undefined;
 }
 
 const CHANGE_KINDS: Record<string, FileChange['change']> = {
@@ -67,15 +82,23 @@ function absorbEvent(line: Line, stats: ProviderStats, tokens: TokenUsage): void
     return;
   }
   if (line.type === 'event_msg' && payload.type === 'task_started') {
-    stats.turnBoundaries.push({ startedAt: line.timestamp });
+    stats.turnBoundaries.push({
+      id: payload.turn_id as string | undefined,
+      startedAt: line.timestamp,
+      completed: false,
+    });
     return;
   }
   if (line.type === 'event_msg' && payload.type === 'task_complete') {
-    const current = stats.turnBoundaries.at(-1);
-    if (current && !current.endedAt) {
-      current.endedAt = line.timestamp;
-      current.durationMs = payload.duration_ms as number | undefined;
-      current.lastMessage = payload.last_agent_message as string | undefined;
+    const turnId = payload.turn_id as string | undefined;
+    // Pair by id: this session starts 12 turns but completes only 9, so
+    // matching by position would attribute durations to the wrong turns.
+    const match = stats.turnBoundaries.find((boundary) => boundary.id === turnId && !boundary.completed);
+    if (match) {
+      match.completed = true;
+      match.endedAt = line.timestamp;
+      match.durationMs = payload.duration_ms as number | undefined;
+      match.lastMessage = payload.last_agent_message as string | undefined;
     }
     return;
   }
@@ -92,8 +115,28 @@ function absorbEvent(line: Line, stats: ProviderStats, tokens: TokenUsage): void
         });
       }
       break;
-    case 'CommandExecution':
+    case 'CommandExecution': {
       stats.commandExecutions = (stats.commandExecutions ?? 0) + 1;
+      const command = Array.isArray(item.command) ? item.command.join(' ') : (item.command ?? '');
+      const record: CommandRecord = {
+        eventIndex: -1, // filled in by the ledger, which knows the event stream
+        turn: 0,
+        command,
+        source: 'provider',
+        ...(item.process_id ? { pid: item.process_id } : {}),
+        ...(item.cwd ? { cwd: canonicalizePath(item.cwd) } : {}),
+        ...(typeof item.exit_code === 'number' ? { exitCode: item.exit_code } : {}),
+        ...(durationOf(item.duration) ? { durationMs: durationOf(item.duration) } : {}),
+        ...(item.stderr?.trim() ? { stderr: item.stderr.trim() } : {}),
+        ...(line.timestamp ? { timestamp: line.timestamp } : {}),
+      };
+      const host = SSH_HOST.exec(command)?.[1];
+      if (host) record.host = host;
+      stats.commands.push(record);
+      break;
+    }
+    case 'Extension':
+      stats.extras[`web:${item.kind ?? 'unknown'}`] = (stats.extras[`web:${item.kind ?? 'unknown'}`] ?? 0) + 1;
       break;
     case 'Reasoning':
     case 'AgentMessage':

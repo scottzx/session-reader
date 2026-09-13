@@ -11,8 +11,10 @@ import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { listRecentSessions, parseSince, resolveSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
-import { buildOverview, classifyUserTurn } from '../src/overview.js';
+import { buildOverview } from '../src/overview.js';
+import { classifyUserTurn } from '../src/classify.js';
 import { eventDetail, summarizeTurns, turnDetail } from '../src/turns.js';
+import { commandLedger, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { fileWrites, resolveWritePath } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
@@ -221,8 +223,11 @@ test('buildOverview reports session-level stats from a real session', async (t) 
   const overview = buildOverview(session);
 
   assert.equal(overview.session.id, ref.id);
+  assert.ok(overview.markdown.includes('## 末态（最后发生的事实）'));
   assert.ok(overview.markdown.includes('## 统计'));
-  assert.ok(overview.markdown.includes('## 落盘（全量）'));
+  assert.ok(overview.markdown.includes('### 项目文件'));
+  // The semantic layer must stay explicitly absent, not faked.
+  assert.ok(overview.markdown.includes('属语义层，本阶段不生成'));
   assert.equal(
     overview.stats.events.tool_call,
     session.turns.filter((turn) => turn.kind === 'tool_call').length,
@@ -278,4 +283,102 @@ test('eventDetail recovers antigravity output that the transcript truncated', as
     return;
   }
   t.skip('no truncated antigravity events available');
+});
+
+async function newestOf(provider: 'codex' | 'antigravity' | 'claude') {
+  const [ref] = await listRecentSessions({ limit: 1, provider });
+  if (!ref) return undefined;
+  const resolved = await resolveSession(ref.id);
+  return resolved ? resolved.adapter.parse(resolved.candidate) : undefined;
+}
+
+test('commandLedger uses the provider ledger when codex records one', async (t) => {
+  const session = await newestOf('codex');
+  if (!session) return t.skip('no local codex sessions');
+  const commands = commandLedger(session);
+  if (!commands.length) return t.skip('session ran no commands');
+
+  assert.ok(commands.every((record) => record.source === 'provider'));
+  assert.equal(commands.length, session.stats.commands.length);
+  // exit codes come from the provider, never from guessing at output text
+  assert.ok(commands.some((record) => record.exitCode !== undefined));
+  for (const record of commands) {
+    if (record.pid !== undefined) assert.match(record.pid, /^\d+$/);
+  }
+});
+
+test('antigravity command records take exit codes from the printed status only', async (t) => {
+  const session = await newestOf('antigravity');
+  if (!session) return t.skip('no local antigravity sessions');
+  const commands = commandLedger(session);
+  if (!commands.length) return t.skip('session ran no commands');
+
+  assert.ok(commands.every((record) => record.source === 'parsed'));
+  // A result without a printed status must not be reported as a success.
+  const results = session.turns.filter((turn) => turn.kind === 'tool_result');
+  const printed = results.filter((turn) => /The command exited with code/.test(turn.toolResult ?? ''));
+  const withCode = results.filter((turn) => turn.exitCode !== undefined);
+  assert.equal(withCode.length, printed.length, 'exit codes must never be invented');
+});
+
+test('errorLedger only reports failures, and flags later success deterministically', async (t) => {
+  const session = await newestOf('codex');
+  if (!session) return t.skip('no local codex sessions');
+  const errors = errorLedger(session);
+  if (!errors.length) return t.skip('session had no failures');
+  for (const record of errors) {
+    assert.ok((record.exitCode ?? 0) !== 0 || record.stderr, 'an error must have a non-zero exit or stderr');
+    assert.equal(typeof record.laterSucceeded, 'boolean');
+  }
+});
+
+test('jobLedger never claims a status it cannot evidence', async (t) => {
+  const session = await newestOf('codex');
+  if (!session) return t.skip('no local codex sessions');
+  const jobs = jobLedger(session);
+  if (!jobs.length) return t.skip('session started no background jobs');
+  for (const job of jobs) {
+    assert.ok(job.evidence.length > 0, 'every job must say why it has its status');
+    // Seeing a launch is not proof a job is alive.
+    if (job.status === 'running') {
+      assert.ok(job.evidence.some((line) => /pid|ps |仍在/.test(line)));
+    }
+  }
+});
+
+test('fileLedger separates project files from runtime and log noise', async (t) => {
+  const session = await newestOf('antigravity');
+  if (!session) return t.skip('no local antigravity sessions');
+  const files = fileLedger(session);
+  if (!files.length) return t.skip('session wrote no files');
+
+  for (const record of files) {
+    if (record.group === 'project') {
+      assert.ok(!record.host, 'a remote file is never a project file');
+      assert.ok(!/\.log$/.test(record.path), 'logs belong to the log group');
+      assert.ok(session.ref.workspace && record.path.startsWith(session.ref.workspace));
+    }
+    if (record.host) assert.equal(record.group === 'project', false);
+  }
+});
+
+test('turn status is evidence-backed and never invented', async (t) => {
+  const session = await newestOf('codex');
+  if (!session) return t.skip('no local codex sessions');
+  const summaries = summarizeTurns(session);
+
+  for (const turn of summaries) {
+    if (turn.status === 'completed') continue;
+    assert.ok(turn.evidence.length > 0, `T${turn.no} claims ${turn.status} with no evidence`);
+  }
+  // Unfinished turns must match the provider's own unpaired task_started records.
+  const declaredOpen = session.stats.turnBoundaries.filter((boundary) => !boundary.completed).length;
+  if (declaredOpen) {
+    assert.equal(summaries.filter((turn) => turn.status === 'unfinished').length, declaredOpen);
+  }
+  for (const turn of summaries) {
+    if (turn.nudgeCount > 0) {
+      assert.ok(turn.evidence.some((line) => line.includes('推进指令')));
+    }
+  }
 });

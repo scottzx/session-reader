@@ -31,6 +31,10 @@ interface Step {
   tool_calls?: { name?: string; args?: Record<string, unknown> }[];
 }
 
+/** Antigravity prints the exit status and a timestamp pair into the result text. */
+const EXIT_CODE = /The command exited with code (\d+)/;
+const TIME_PAIR = /Created At:\s*(\S+)\s*\nCompleted At:\s*(\S+)/;
+
 const IMAGE_EXT = /\.(?:png|jpe?g|gif|webp|svg)$/i;
 const TEXT_EXT = /\.(?:md|txt|json|csv)$/i;
 
@@ -239,13 +243,25 @@ export const antigravityAdapter: ProviderAdapter = {
         push({ kind: 'tool_call', toolName: call.name, toolArgs: args, timestamp, sourceIndex, truncated });
       }
       if (step.type === 'GENERIC' && step.content) {
+        const exit = EXIT_CODE.exec(step.content);
+        const times = TIME_PAIR.exec(step.content);
+        const exitCode = exit ? Number(exit[1]) : undefined;
+        const durationMs = times
+          ? Math.max(0, Date.parse(times[2]!) - Date.parse(times[1]!)) || undefined
+          : undefined;
         push({
           kind: 'tool_result',
           toolResult: step.content,
-          isError: /Encountered error|Error:|command failed/i.test(step.content.slice(0, 400)),
+          // Prefer the printed exit status; fall back to wording only without one.
+          isError:
+            exitCode !== undefined
+              ? exitCode !== 0
+              : /Encountered error|Error:|command failed/i.test(step.content.slice(0, 400)),
           timestamp,
           sourceIndex,
           truncated,
+          ...(exitCode !== undefined ? { exitCode } : {}),
+          ...(durationMs !== undefined ? { durationMs } : {}),
         });
       }
     }
