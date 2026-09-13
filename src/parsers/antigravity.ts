@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { readJsonl } from '../util/jsonl.js';
 import { canonicalizePath, findRepoRoot } from '../util/paths.js';
+import { importSqlite } from '../util/sqlite.js';
 import { clip, oneLine, stripPromptEnvelope } from '../util/text.js';
 import {
   emptyProviderStats,
@@ -16,6 +17,8 @@ import {
 import type { ProviderAdapter, SessionCandidate } from './provider.js';
 
 const BRAIN_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+/** The IDE's own project↔session mapping: one SQLite file per conversation. */
+const CONVERSATIONS_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'conversations');
 const TRANSCRIPTS = ['transcript.jsonl', 'transcript_full.jsonl'];
 /** Args whose value is an absolute path we can use to locate the repository. */
 const PATH_ARGS = ['AbsolutePath', 'DirectoryPath', 'SearchPath', 'TargetFile', 'FilePath'];
@@ -98,6 +101,82 @@ function unwrapArgs(args: Record<string, unknown> | undefined): Record<string, u
     out[key] = raw;
   }
   return out;
+}
+
+/** One protobuf varint: its value and the offset just past it. */
+function varint(buf: Buffer, at: number): [number, number] {
+  let value = 0;
+  let shift = 0;
+  let i = at;
+  while (i < buf.length) {
+    const byte = buf[i++]!;
+    value += (byte & 0x7f) * 2 ** shift;
+    shift += 7;
+    if (!(byte & 0x80)) break;
+  }
+  return [value, i];
+}
+
+/** The bytes of the first length-delimited field `no`, or nothing. */
+function protoField(buf: Buffer, no: number): Buffer | undefined {
+  let i = 0;
+  while (i < buf.length) {
+    const [key, afterKey] = varint(buf, i);
+    const wire = key & 7;
+    if (wire === 2) {
+      const [length, afterLength] = varint(buf, afterKey);
+      if (key >>> 3 === no) return buf.subarray(afterLength, afterLength + length);
+      i = afterLength + length;
+      continue;
+    }
+    // Skip the fixed and varint shapes; anything else is not a message we know.
+    if (wire === 0) i = varint(buf, afterKey)[1];
+    else if (wire === 5) i = afterKey + 4;
+    else if (wire === 1) i = afterKey + 8;
+    else return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The folder a trajectory was opened in, out of the IDE's own metadata blob.
+ *
+ * Field 1.1 is that folder as a `file://` URI (1.2 holds the enclosing
+ * workspace root when the two differ, 1.4 the git branch). Sessions started
+ * with no folder open — the IDE labels them `outside-of-project` — carry no
+ * field 1 at all, and an unknown workspace is the honest answer for them.
+ */
+export function workspaceFromTrajectoryBlob(data: Uint8Array): string | undefined {
+  const opened = protoField(Buffer.from(data), 1);
+  const uri = opened && protoField(opened, 1);
+  return uri?.length ? canonicalizePath(uri.toString('utf8')) : undefined;
+}
+
+/**
+ * The workspace as the IDE itself records it.
+ *
+ * Antigravity keeps a SQLite file per conversation whose `trajectory_metadata_blob`
+ * holds the blob above. That is the same relation the IDE draws its project
+ * list from, so it beats guessing from tool arguments — which returns the git
+ * root, or a path from some other tree the session happened to touch first.
+ */
+async function workspaceFromConversation(id: string): Promise<string | undefined> {
+  const file = path.join(CONVERSATIONS_DIR, `${id}.db`);
+  if (!(await fs.access(file).then(() => true, () => false))) return undefined;
+  const { DatabaseSync } = await importSqlite();
+  let db: InstanceType<typeof DatabaseSync> | undefined;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    const row = db.prepare('SELECT data FROM trajectory_metadata_blob LIMIT 1').get() as
+      | { data?: Uint8Array }
+      | undefined;
+    return row?.data ? workspaceFromTrajectoryBlob(row.data) : undefined;
+  } catch {
+    // A half-written or future-shaped database is not worth failing a listing over.
+    return undefined;
+  } finally {
+    db?.close();
+  }
 }
 
 function workspaceFromCall(name: string | undefined, args: Record<string, unknown>): string | undefined {
@@ -186,7 +265,7 @@ export const antigravityAdapter: ProviderAdapter = {
 
   async scanRef(candidate: SessionCandidate): Promise<SessionRef> {
     let title: string | undefined;
-    let workspace: string | undefined;
+    let workspace = await workspaceFromConversation(candidate.id);
     let createdAt: string | undefined;
     for await (const raw of readJsonl(candidate.path, { maxLines: 400 })) {
       const step = raw as Step;
@@ -234,7 +313,7 @@ export const antigravityAdapter: ProviderAdapter = {
   async parse(candidate: SessionCandidate): Promise<NormalizedSession> {
     const turns: TurnEvent[] = [];
     let title: string | undefined;
-    let workspace: string | undefined;
+    let workspace = await workspaceFromConversation(candidate.id);
     let createdAt: string | undefined;
 
     const stats = emptyProviderStats();

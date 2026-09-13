@@ -49,6 +49,52 @@ export function findSessionRow(db: DatabaseSync, needle: string): SessionRow | u
     .get(`${needle}%`) as SessionRow | undefined;
 }
 
+export interface ListQuery {
+  /** Ids seen on disk during this sweep; rows outside it are stale and skipped. */
+  ids: string[];
+  /** Canonical root; matches the directory itself and everything under it. */
+  workspace?: string;
+  provider?: string;
+  sinceMs?: number;
+  limit?: number;
+}
+
+/**
+ * The listing served from the index: newest first, no scan budget, so a
+ * workspace never silently loses its older sessions to a candidate cap.
+ */
+export function listSessionRows(db: DatabaseSync, query: ListQuery): SessionRow[] {
+  if (!query.ids.length) return [];
+  db.exec('DROP TABLE IF EXISTS temp.list_scope');
+  db.exec('CREATE TEMP TABLE list_scope (id TEXT PRIMARY KEY)');
+  const insert = db.prepare('INSERT OR IGNORE INTO temp.list_scope (id) VALUES (?)');
+  for (const id of query.ids) insert.run(id);
+
+  const where = ['id IN (SELECT id FROM temp.list_scope)'];
+  const params: (string | number)[] = [];
+  if (query.workspace) {
+    // Prefix comparison rather than LIKE: real paths contain `_`, a LIKE wildcard.
+    where.push('(workspace = ? OR substr(workspace, 1, ?) = ?)');
+    params.push(query.workspace, query.workspace.length + 1, `${query.workspace}/`);
+  }
+  if (query.provider) {
+    where.push('provider = ?');
+    params.push(query.provider);
+  }
+  if (query.sinceMs) {
+    where.push('source_mtime_ms >= ?');
+    params.push(query.sinceMs);
+  }
+  params.push(query.limit ?? 20);
+  return db
+    .prepare(
+      `SELECT * FROM sessions WHERE ${where.join(' AND ')} ` +
+        // Undated rows sort last instead of first, which is where DESC puts NULL.
+        'ORDER BY (ended_at IS NULL), ended_at DESC LIMIT ?',
+    )
+    .all(...params) as unknown as SessionRow[];
+}
+
 export function refOf(row: SessionRow): SessionRef {
   return {
     id: row.native_id,

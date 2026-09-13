@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { importSqlite } from '../util/sqlite.js';
 import { DDL, SCHEMA_VERSION } from './schema.js';
 
 /** Where the index lives. `SESSION_READER_DB` overrides it (tests, CI). */
@@ -9,25 +10,6 @@ export function defaultDbPath(): string {
   const override = process.env.SESSION_READER_DB;
   if (override) return override;
   return path.join(os.homedir(), '.1agents', 'session-reader', 'index.db');
-}
-
-/**
- * `node:sqlite` is still flagged experimental and prints a warning on load.
- * Filtering just that one message keeps every other warning intact — far less
- * rude than `removeAllListeners('warning')`.
- */
-async function importSqlite(): Promise<typeof import('node:sqlite')> {
-  const original = process.emitWarning;
-  process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
-    const text = typeof warning === 'string' ? warning : (warning?.message ?? '');
-    if (text.includes('SQLite is an experimental feature')) return;
-    return (original as (...args: unknown[]) => void).call(process, warning, ...rest);
-  }) as typeof process.emitWarning;
-  try {
-    return await import('node:sqlite');
-  } finally {
-    process.emitWarning = original;
-  }
 }
 
 let cached: DatabaseSync | undefined;

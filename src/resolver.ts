@@ -17,6 +17,13 @@ const WORKSPACE_SCAN = 600;
 export interface ListOptions {
   limit?: number;
   /**
+   * Serve the listing from the index (the default). The sweep still checks
+   * every session file's fingerprint, but only the ones whose bytes moved are
+   * parsed again — so a listing is complete regardless of `scan`, and cheap
+   * after the first run. Set false to read the source files directly.
+   */
+  useIndex?: boolean;
+  /**
    * How many session files may be opened. Defaults to a small budget so an
    * unfiltered `list` stays cheap; pass `Infinity` when completeness matters
    * more than latency (indexing, search).
@@ -68,7 +75,10 @@ function couldBelong(candidate: SessionCandidate, provider: AgentProvider, works
 /** Discovery that keeps the adapter handle, so callers can parse without a second scan. */
 export async function listResolvedSessions(options: ListOptions = {}): Promise<ResolvedSession[]> {
   const limit = options.limit ?? 20;
-  const workspace = options.workspace ? canonicalizePath(options.workspace) : undefined;
+  // `/` contains every session by definition, so filtering on it would only
+  // cost a scan and drop the sessions whose cwd we could not recover.
+  const scoped = options.workspace ? canonicalizePath(options.workspace) : undefined;
+  const workspace = scoped && scoped !== '/' ? scoped : undefined;
   const sinceMs = parseSince(options.since);
   const found: ResolvedSession[] = [];
 
@@ -95,7 +105,45 @@ export async function listResolvedSessions(options: ListOptions = {}): Promise<R
 }
 
 export async function listRecentSessions(options: ListOptions = {}): Promise<SessionRef[]> {
-  return (await listResolvedSessions(options)).map((session) => session.ref);
+  if (options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1') {
+    return (await listResolvedSessions(options)).map((session) => session.ref);
+  }
+  return listIndexedSessions(options);
+}
+
+/**
+ * The listing as the index sees it: a fingerprint sweep over every candidate
+ * (cheap once indexed), then one SQL query. Unlike the scanning path this one
+ * has no candidate budget, so a workspace never quietly loses its older
+ * sessions once a provider grows past `WORKSPACE_SCAN` files.
+ */
+async function listIndexedSessions(options: ListOptions): Promise<SessionRef[]> {
+  const { openStore } = await import('./store/db.js');
+  const { refreshSession } = await import('./store/indexer.js');
+  const { listSessionRows, refOf } = await import('./store/read.js');
+  const db = await openStore();
+  const sinceMs = parseSince(options.since);
+  const ids: string[] = [];
+
+  for (const adapter of adapters) {
+    if (options.provider && adapter.provider !== options.provider) continue;
+    for (const candidate of await adapter.listCandidates()) {
+      if (sinceMs && candidate.mtimeMs < sinceMs) break; // candidates are newest first
+      const result = await refreshSession(db, { adapter, candidate }, { edges: false }).catch(
+        () => undefined,
+      );
+      if (result) ids.push(result.id);
+    }
+  }
+
+  const scoped = options.workspace ? canonicalizePath(options.workspace) : undefined;
+  return listSessionRows(db, {
+    ids,
+    ...(scoped && scoped !== '/' ? { workspace: scoped } : {}),
+    ...(options.provider ? { provider: options.provider } : {}),
+    ...(sinceMs ? { sinceMs } : {}),
+    limit: options.limit ?? 20,
+  }).map(refOf);
 }
 
 export async function findSessionsByWorkspace(

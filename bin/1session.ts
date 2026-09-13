@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
@@ -13,7 +14,7 @@ import type { DigestFocus, FileGroup, NormalizedSession, TurnKind } from '../src
 
 const USAGE = `1session — cross-agent session Read Plane
 
-  1session list [--limit <n>] [--workspace <path>] [--provider <name>] [--since 24h] [--json]
+  1session list [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--since 24h] [--json]
   1session overview <session-id> [--json]              第 1 层：会话概要
   1session turns <session-id> [--json]                 第 2 层：逐轮概要
   1session turn <session-id> <n> [--event <k>] [--json] 第 3 层：单轮 / 单次工具调用明细
@@ -23,13 +24,16 @@ const USAGE = `1session — cross-agent session Read Plane
   1session errors <session-id> [--json]
   1session digest <session-id> [--focus marketing|review|full] [--json]
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
-  1session index [<session-id>] [--all] [--force] [--since 30d]  建立/刷新索引
+  1session index [<session-id>] [--all] [--scope <path>|cwd|global] [--force] [--since 30d]  建立/刷新索引
   1session graph <session-id> [--json]                 会话之间的引用关系
-  1session search <query> [--workspace path] [--since 24h] [--limit n] [--provider name]
+  1session search <query> [--scope <path>|cwd|global] [--since 24h] [--limit n] [--provider name]
                           [--kind user,assistant,thinking,tool_call,tool_result]
                           [--regex] [--case] [--context n] [--max-hits n] [--json]
 
 全局：--no-index 绕过索引直读源文件。索引位于 ~/.1agents/session-reader/index.db
+     list / search / index --all 默认只看当前 pwd 目录（含子目录）下的会话。
+     --scope 取当前目录的相对路径或绝对路径，按子树匹配：--scope .. 含同级项目，
+     --scope ~ 含 home 下全部；--global（= --scope global，= --scope /）跨全部项目。
 
 Providers: antigravity (~/.gemini/antigravity/brain), claude (~/.claude/projects), codex (~/.codex/sessions).
 `;
@@ -42,7 +46,7 @@ interface Args {
 
 /** Flags that never take a value, so they cannot swallow a positional. */
 const BOOLEAN_FLAGS = new Set([
-  'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index',
+  'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index', 'global',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -97,6 +101,22 @@ const focusOf = (value: string | boolean | undefined): DigestFocus => {
   return focus === 'marketing' || focus === 'full' ? focus : 'review';
 };
 
+/**
+ * Which folder a listing covers. `cwd` (the default) is the current working
+ * directory, `global` is everything, and anything else is read as a path —
+ * relative to the cwd or absolute — whose whole subtree is included, so
+ * `--scope ..` covers the sibling projects too and `--scope /` is `global`.
+ * `--workspace <path>` is the older spelling of the path form and wins.
+ */
+function scopeWorkspace(flags: Record<string, string | boolean>): string | undefined {
+  const scope = str(flags.workspace) ?? str(flags.scope) ?? (flags.global === true ? 'global' : 'cwd');
+  if (scope === 'global') return undefined;
+  const target = canonicalizePath(scope === 'cwd' ? process.cwd() : scope);
+  // A mistyped path would otherwise read as an honest "no sessions found".
+  if (!existsSync(target)) throw new Error(`--scope 目录不存在：${scope}`);
+  return target;
+}
+
 function print(json: boolean, data: unknown, text: string): void {
   console.log(json ? JSON.stringify(data, null, 2) : text);
 }
@@ -129,9 +149,10 @@ async function main(): Promise<void> {
     case 'list': {
       const refs = await listRecentSessions({
         limit: num(flags.limit) ?? 20,
-        workspace: str(flags.workspace),
+        workspace: scopeWorkspace(flags),
         since: str(flags.since),
         provider: str(flags.provider) as never,
+        useIndex,
       });
       print(
         json,
@@ -271,6 +292,7 @@ async function main(): Promise<void> {
         workspace: target,
         since: str(flags.since),
         limit: num(flags.limit) ?? 50,
+        useIndex,
       });
       print(
         json,
@@ -355,7 +377,7 @@ async function main(): Promise<void> {
     case 'search': {
       const query = positional.join(' ');
       const hits = await searchSessions(query, {
-        workspace: str(flags.workspace),
+        workspace: scopeWorkspace(flags),
         since: str(flags.since),
         limit: num(flags.limit),
         provider: str(flags.provider) as never,
@@ -418,6 +440,7 @@ async function main(): Promise<void> {
       const handles = await listResolvedSessions({
         limit: num(flags.limit) ?? Number.POSITIVE_INFINITY,
         scan: num(flags.scan) ?? Number.POSITIVE_INFINITY,
+        workspace: scopeWorkspace(flags),
         ...(str(flags.since) ? { since: str(flags.since)! } : {}),
         ...(str(flags.provider) ? { provider: str(flags.provider) as never } : {}),
       });

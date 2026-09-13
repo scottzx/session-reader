@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { antigravityAdapter } from '../src/parsers/antigravity.js';
+import { antigravityAdapter, workspaceFromTrajectoryBlob } from '../src/parsers/antigravity.js';
 import { claudeAdapter } from '../src/parsers/claude.js';
 import { codexAdapter } from '../src/parsers/codex.js';
 import type { ProviderAdapter } from '../src/parsers/provider.js';
@@ -107,6 +107,38 @@ test('listRecentSessions returns newest-first refs across providers', async (t) 
   assert.ok(refs.length <= 5);
   const times = refs.map((ref) => Date.parse(ref.updatedAt ?? ''));
   assert.deepEqual(times, [...times].sort((a, b) => b - a));
+});
+
+test('workspaceFromTrajectoryBlob reads the folder Antigravity opened', () => {
+  // field 1 { field 1: "file:///tmp/a b", field 4: "master" }
+  const uri = Buffer.from('file:///tmp/a%20b', 'utf8');
+  const branch = Buffer.from('master', 'utf8');
+  const opened = Buffer.concat([
+    Buffer.from([0x0a, uri.length]), uri,
+    Buffer.from([0x22, branch.length]), branch,
+  ]);
+  const blob = Buffer.concat([Buffer.from([0x0a, opened.length]), opened]);
+  assert.equal(workspaceFromTrajectoryBlob(blob), canonicalizePath('/tmp/a b'));
+
+  // An `outside-of-project` session carries no field 1 — only later fields.
+  const id = Buffer.from('outside-of-project', 'utf8');
+  const chatOnly = Buffer.concat([Buffer.from([0x92, 0x01, id.length]), id]);
+  assert.equal(workspaceFromTrajectoryBlob(chatOnly), undefined);
+});
+
+test('a workspace filter covers the whole subtree, and / filters nothing', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref?.workspace) return t.skip('no local sessions with a known workspace');
+
+  // The session lives *under* its parent directory, never equal to it.
+  const parent = path.dirname(ref.workspace);
+  const inParent = await listRecentSessions({ limit: 200, workspace: parent });
+  assert.ok(inParent.some((item) => item.id === ref.id), 'subtree listing must contain the child');
+  for (const item of inParent) assert.ok(item.workspace && isInside(parent, item.workspace));
+
+  const root = await listRecentSessions({ limit: 5, workspace: '/' });
+  const unfiltered = await listRecentSessions({ limit: 5 });
+  assert.deepEqual(root.map((item) => item.id), unfiltered.map((item) => item.id));
 });
 
 test('resolveSession finds a session by id prefix', async (t) => {

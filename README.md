@@ -36,7 +36,7 @@ npm run build && node dist/bin/1session.js <command>
 
 | 命令 | 说明 |
 | --- | --- |
-| `1session list [--limit n] [--workspace path] [--provider name] [--since 24h] [--json]` | 按最近更新列出各智能体的会话 |
+| `1session list [--limit n] [--scope <path>\|cwd\|global] [--provider name] [--since 24h] [--json]` | 按最近更新列出各智能体的会话（默认当前 pwd 子树，见 `--scope`） |
 | `1session overview <session-id> [--json]` | **第 1 层**：统计卡片（轮次/文件/命令/提交/产物/上传/后台任务/token）+ 目标、口径修正、状态锚点、全量落盘 |
 | `1session turns <session-id> [--json]` | **第 2 层**：逐轮概要——时间、耗时、事件区间、文件/命令/失败数、用户说了什么、agent 回了什么 |
 | `1session turn <session-id> <n> [--event k] [--json]` | **第 3 层**：展开某一轮的全部事件；`--event` 定位单次工具调用，输出完整参数与**未截断**结果 |
@@ -46,11 +46,56 @@ npm run build && node dist/bin/1session.js <command>
 | `1session commands <id> [--failed] [--host h] [--turn n] [--json]` | 命令账本：exit_code / 耗时 / cwd |
 | `1session files <id> [--group project\|runtime\|log\|all] [--json]` | 文件账本，按项目 / 运行态 / 日志分组 |
 | `1session errors <id> [--json]` | 失败命令，带 stderr 与"同前缀命令后续是否成功" |
-| `1session search <query> [--workspace p] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段 |
-| `1session index [<id>] [--all] [--force] [--since 30d]` | 建立 / 刷新索引；`--all` 全库回填 |
+| `1session search <query> [--scope <path>\|cwd\|global] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段（默认当前 pwd 子树，见 `--scope`） |
+| `1session index [<id>] [--all] [--scope <path>\|cwd\|global] [--force] [--since 30d]` | 建立 / 刷新索引；`--all` 全库回填 |
 | `1session graph <id> [--json]`（别名 `related`） | 会话之间的引用关系 + 每条边的证据 |
 
 全局开关 `--no-index` 绕过索引直读源文件。
+
+### `--scope`：会话按路径子树取
+
+`list` / `search` / `index --all` **默认只看当前 pwd 这棵子树下的会话**；跨项目要显式说出来。`--scope` 取三种值：
+
+| 值 | 含义 |
+| --- | --- |
+| 省略 / `cwd` | 当前 pwd **及其所有子目录**下的会话 |
+| 相对路径（`..`、`../web`、`~/proj`）或绝对路径（`/Users/me/proj`） | 该目录**及其所有子目录**下的会话 |
+| `global`（或 `--global`，或 `--scope /`） | 全部会话 |
+
+按子树取而不是按目录相等取：`--scope ~/Documents` 会列出 `~/Documents` 下每一个项目的会话，而不只是恰好在 `~/Documents` 里启动的那几个。目录写错会直接报错，不会静悄悄地返回"0 个会话"。
+
+```bash
+1session list                        # 当前项目（含子模块）
+1session list --scope ..             # 连同同级的兄弟项目
+1session list --scope ~/Documents    # 这棵树下的全部项目
+1session list --global               # 全部
+1session search "超时" --scope ../..  # 在祖父目录这棵树里检索
+1session index --all --global        # 全库回填索引
+```
+
+（`--workspace <path>` 是路径形式的旧拼法，仍然可用，优先于 `--scope`。）
+
+**路径从哪来**（三家各写各的，读之前先归一）：
+
+| Provider | 项目路径 | 时间 |
+| --- | --- | --- |
+| claude | 目录名 = cwd 的 slug（`~/.claude/projects/-Users-me-proj/`），每行 JSONL 另带 `cwd` | `updatedAt` = 文件 mtime；`createdAt` = 首行 `timestamp` |
+| codex | 目录只按日期分（`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`），路径只在 `session_meta` / `turn_context` 的 `payload.cwd` 里 | `updatedAt` = mtime；`createdAt` = `session_meta.timestamp`，兜底解析文件名里的时间戳 |
+| antigravity | transcript 里没有 cwd，但 IDE 自己维护着项目↔会话的关系：`~/.gemini/antigravity/conversations/<id>.db` 的 `trajectory_metadata_blob` 里存着打开的目录（protobuf 字段 1.1，`file://` URI；1.2 是外层 workspace 根，1.4 是 git 分支）。读它，读不到才退回从工具参数里猜 | `updatedAt` = mtime；`createdAt` = 首个 step 的 `created_at` |
+
+排序和 `--since` 都只用 mtime，`listCandidates()` 一次 `stat` 就够，不必打开文件 —— 打开文件（拿标题、cwd、创建时间）才是贵的那一步，所以它走索引缓存。
+
+Antigravity 的 626 个会话里，本机有 14 个至今没有路径 —— 不是没读到，是 IDE 自己把它们标成了 `outside-of-project`（开着聊天窗口、没开文件夹时起的会话）。这类会话只在 `--global` 下出现。
+
+### 列表为什么是全的
+
+`list` / `workspace` / `search` 都走索引：先对每个会话文件做一次指纹检查（size + mtime + 头部哈希），**只有字节动过的才重新解析**，然后用一条 SQL 出结果。所以：
+
+- 没有扫描预算，`--scope` 再大也不会悄悄丢掉更早的会话；
+- 第一次全量解析本机 625 个会话约 **10s**，之后每次 `list` 约 **0.5s**；
+- `--no-index` 仍然可以绕开索引直读源文件，两条路的结果应当逐条一致（可以 `diff` 验证）。
+
+升级到这一版后，索引会因为 `PARSER_VERSION` 提升而自动重建一次（antigravity 的 workspace 口径变了），无需手动清库；想主动做可以跑 `1session index --all --global`。
 
 `<session-id>` 支持完整 id、id 前缀（≥6 位）或原始文件路径。
 
