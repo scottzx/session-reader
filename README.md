@@ -24,6 +24,34 @@ npx @1agents/session-reader list      # 不安装直接用
 
 要求 Node.js >= 22.5（依赖内置的 `node:sqlite`），零运行时依赖。
 
+## 内置 skill：一条命令装到三家智能体
+
+`1session` 自带一个 skill（`skills/1session/`），装进三家智能体各自的 skills 目录后，
+它们在用户问起"上次/之前/那个报错"时会自己想起来调这个 CLI，而不需要你每次手动贴命令。
+
+```bash
+1session skill install        # 链接到三家（未安装的智能体会跳过）
+1session skill status         # 看三家各自是什么状态
+1session skill uninstall      # 撤掉
+```
+
+| 智能体 | 落位 |
+| --- | --- |
+| claude | `~/.claude/skills/1session` |
+| codex | `~/.codex/skills/1session` |
+| antigravity | `~/.gemini/antigravity/skills/1session`（**不是** `~/.gemini/skills`，那是 gemini-cli 的位） |
+
+三家的格式完全一致（`<dir>/<name>/SKILL.md` + YAML frontmatter），所以装的是同一份文件。
+
+默认建**符号链接**而不是拷贝：下次 `npm i -g @1agents/session-reader@latest` 升级后，
+三家看到的 skill 自动就是新的，不用记着重装。Claude Code 实测会跟随符号链接并热加载。
+如果某家的加载器不认符号链接（表现是 `status` 显示已链接、但智能体里看不到这个 skill），
+用 `1session skill install --copy` 换成拷贝——代价是升级后要重跑一次安装，`status`
+会把"拷贝与当前包不一致"显式标出来。
+
+其他开关：`--agent claude,codex`（只装指定的几家，即使该智能体尚未安装也会建目录，
+方便先装 skill 后装智能体）、`--dry-run`（只说会做什么）、`--force`（覆盖同名条目）。
+
 ## CLI
 
 ```bash
@@ -49,6 +77,7 @@ npm run build && node dist/bin/1session.js <command>
 | `1session search <query> [--scope <path>\|cwd\|global] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段（默认当前 pwd 子树，见 `--scope`） |
 | `1session index [<id>] [--all] [--scope <path>\|cwd\|global] [--force] [--since 30d]` | 建立 / 刷新索引；`--all` 全库回填 |
 | `1session graph <id> [--json]`（别名 `related`） | 会话之间的引用关系 + 每条边的证据 |
+| `1session skill install\|status\|uninstall [--agent a,b] [--copy] [--force] [--dry-run]` | 把内置 skill 装进三家智能体的 skills 目录（见上） |
 
 全局开关 `--no-index` 绕过索引直读源文件。
 

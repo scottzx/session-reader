@@ -19,6 +19,7 @@ import { commandLedger, errorLedger, fileLedger, jobLedger } from '../src/ledger
 import { fileWrites, resolveWritePath, stripHeredocs } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
+import { installSkill, skillStatus, uninstallSkill } from '../src/skill.js';
 
 const VALID_KINDS = new Set(['user', 'assistant', 'thinking', 'tool_call', 'tool_result']);
 
@@ -759,4 +760,52 @@ test('indexed search and --no-index agree hit for hit', async (t) => {
   }
   if (!compared) return t.skip('no local sessions matched');
   t.diagnostic(`compared ${compared} query shape(s)`);
+});
+
+test('skill install links into every agent, is idempotent and reversible', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), '1session-skill-'));
+  for (const dir of ['.claude', '.codex', path.join('.gemini', 'antigravity')]) {
+    await fs.mkdir(path.join(home, dir), { recursive: true });
+  }
+
+  const first = await installSkill({ home });
+  assert.deepEqual(
+    first.map((row) => [row.agent, row.action]),
+    [['claude', 'linked'], ['codex', 'linked'], ['antigravity', 'linked']],
+  );
+  // Every agent reads the same file through its own path.
+  for (const row of skillStatus(home)) {
+    assert.equal(row.state.kind, 'linked');
+    const skill = await fs.readFile(path.join(row.entryPath, 'SKILL.md'), 'utf8');
+    assert.match(skill, /^name: 1session$/m);
+  }
+
+  const again = await installSkill({ home });
+  assert.deepEqual(new Set(again.map((row) => row.action)), new Set(['unchanged']));
+
+  const removed = await uninstallSkill({ home });
+  assert.deepEqual(new Set(removed.map((row) => row.action)), new Set(['removed']));
+  assert.deepEqual(new Set(skillStatus(home).map((row) => row.state.kind)), new Set(['absent']));
+  await fs.rm(home, { recursive: true, force: true });
+});
+
+test('skill install skips agents that are not installed, and can copy instead of link', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), '1session-skill-'));
+  await fs.mkdir(path.join(home, '.codex'), { recursive: true });
+
+  const results = await installSkill({ home, mode: 'copy' });
+  const byAgent = Object.fromEntries(results.map((row) => [row.agent, row.action]));
+  assert.equal(byAgent.codex, 'copied');
+  assert.equal(byAgent.claude, 'skipped');
+  assert.equal(byAgent.antigravity, 'skipped');
+
+  const status = skillStatus(home).find((row) => row.agent === 'codex')!;
+  assert.deepEqual(status.state, { kind: 'copied', current: true });
+  // A copy that drifted from the package must not read as up to date.
+  await fs.writeFile(path.join(status.entryPath, 'SKILL.md'), 'stale');
+  assert.deepEqual(skillStatus(home).find((row) => row.agent === 'codex')!.state, {
+    kind: 'copied',
+    current: false,
+  });
+  await fs.rm(home, { recursive: true, force: true });
 });
