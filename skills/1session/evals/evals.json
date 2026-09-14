@@ -42,6 +42,48 @@
         "Gives a drill-down handle — a turn/event number or an exact command the user can run to see the evidence",
         "Reports how it was verified (tests green / the commit) rather than only describing the change"
       ]
+    },
+    {
+      "id": 3,
+      "name": "missing-cli-still-answers",
+      "prompt": "上周我在这台机器上调一个超时的问题，后来是怎么解决的？（顺便说一句，我这台机器上好像没装过什么 1session，`1session` 这个命令敲下去是 command not found）",
+      "expected_output": "Recognizes the CLI is absent, immediately falls back to `npx -y @1agents/session-reader@latest ...` to actually answer the timeout question, and only then mentions the permanent install as a one-time follow-up — rather than stopping to install first or declaring it cannot help.",
+      "files": [],
+      "assertions": [
+        "Falls back to npx (`npx -y @1agents/session-reader@latest ...`) instead of stopping at the missing command",
+        "Actually attempts to answer the user's timeout question rather than turning the turn into a setup errand",
+        "Mentions the permanent install (`npm i -g @1agents/session-reader`) as an optional follow-up, not as a precondition",
+        "Does not run a global npm install without the user agreeing to it first",
+        "Does not claim the question is unanswerable because the CLI is missing"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "distribute-to-a-colleague",
+      "prompt": "同事看我能翻出以前会话的记录，也想在他 mac 上用。我要发给他什么？他那边只装了 claude code 和 codex，另外他 node 好像还是 20。",
+      "expected_output": "Gives the two-line install (npm i -g, then `1session skill install`), explains that the second line is what puts the skill into Claude Code and Codex, and flags that Node 20 is below the 22.15 floor so he must upgrade Node first — npx will not work around it either.",
+      "files": [],
+      "assertions": [
+        "Gives `npm i -g @1agents/session-reader` as the install command",
+        "Includes `1session skill install` and explains it is what puts the skill into the colleague's agents, not just the CLI",
+        "Flags Node 20 as below the >= 22.15 requirement and says it must be upgraded",
+        "Does not suggest npx as a way around the old Node version (it runs on the same runtime and fails identically)",
+        "Does not invent an install path that does not exist (no curl|sh script, no brew formula, no manual git clone as the primary route)"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "npx-skill-install-trap",
+      "prompt": "我不想全局装东西，能不能直接用 npx 把这个 skill 装到我的 claude 和 codex 里就好？",
+      "expected_output": "Warns that `skill install` in its default link mode would point at the npx cache directory, which npm garbage-collects — the skill would silently vanish later. Offers `--copy` as the npx-compatible route, or a global install as the robust one.",
+      "files": [],
+      "assertions": [
+        "Warns that a link-mode install via npx points into the npx cache (~/.npm/_npx/...) which npm later prunes",
+        "Names the consequence concretely: the skill silently disappears from the agents afterwards",
+        "Offers `--copy` as the way to make an npx-based install survive, and/or a global install as the robust alternative",
+        "Mentions `--agent claude,codex` or otherwise respects that the user only wants those two",
+        "Does not simply tell the user to run `npx ... skill install` with no caveat"
+      ]
     }
   ]
 }

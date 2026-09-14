@@ -1420,3 +1420,23 @@ test('serve 的默认端口就是 L0 约定的那个', async () => {
   const usage = await fsp.readFile(new URL('../bin/1session.ts', import.meta.url), 'utf8');
   assert.match(usage, new RegExp(`--port ${DEFAULT_PORT}`));
 });
+
+test('端口被占用时给人话，不是一屏 Node 栈', async () => {
+  const { serve } = await import('../src/serve/http.js');
+  const first = await serve({ port: 0, host: '127.0.0.1', report: false });
+  const taken = (first.address() as import('node:net').AddressInfo).port;
+  try {
+    await assert.rejects(
+      () => serve({ port: taken, host: '127.0.0.1', report: false }),
+      (error: Error) => {
+        assert.match(error.message, new RegExp(`端口 ${taken} 已被占用`));
+        // 报错要带上怎么办，否则用户还得自己查命令。
+        assert.match(error.message, /--port/);
+        assert.match(error.message, /lsof/);
+        return true;
+      },
+    );
+  } finally {
+    await new Promise<void>((resolve) => first.close(() => resolve()));
+  }
+});

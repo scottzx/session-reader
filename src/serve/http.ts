@@ -208,7 +208,23 @@ export function createServer(options: ServeOptions = {}): http.Server {
 export async function serve(options: ServeOptions = {}): Promise<http.Server> {
   const host = options.host ?? '127.0.0.1';
   const server = createServer(options);
-  await new Promise<void>((resolve) => server.listen(options.port ?? DEFAULT_PORT, host, resolve));
+  // 请求的端口。实际绑定到哪个从 server.address() 读——传 0 时它是随机的。
+  const wanted = options.port ?? DEFAULT_PORT;
+  // 端口占用是最常见的启动失败，默认会抛一整屏 Node 栈——对着栈猜"是不是
+  // 已经起了一个"没意义，直接说清楚怎么办。
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      reject(
+        error.code === 'EADDRINUSE'
+          ? new Error(
+              `端口 ${wanted} 已被占用。换一个：--port <n>；或先停掉占用它的进程：` +
+                `lsof -nP -iTCP:${wanted} -sTCP:LISTEN`,
+            )
+          : error,
+      );
+    });
+    server.listen(wanted, host, resolve);
+  });
   const { port } = server.address() as AddressInfo;
   const identity = await nodeIdentity();
 

@@ -71,6 +71,21 @@ npx @1agents/session-reader list      # 不安装直接用
 其他开关：`--agent claude,codex`（只装指定的几家，即使该智能体尚未安装也会建目录，
 方便先装 skill 后装智能体）、`--dry-run`（只说会做什么）、`--force`（覆盖同名条目）。
 
+**别用 `npx` 跑 `skill install`。** 默认的链接模式会指回包所在目录，而 npx 装的那份在
+`~/.npm/_npx/<hash>/` 的缓存里，npm 自己会清。清掉那天五家的 skill 一起静悄悄消失。
+先 `npm i -g` 再 `skill install`；实在要从 npx 引导就加 `--copy`，把字节交给各家自己拿着。
+
+传播给别人时，两行就够——第二行是大家会忘的那行：只装 CLI 的人得自己记着它存在，
+两行都跑了的人是智能体替他记着。
+
+```bash
+npm i -g @1agents/session-reader
+1session skill install
+```
+
+skill 自己也带着这套安装说明（`skills/1session/references/install.md`）：即便对方只拿到
+一份 SKILL.md、机器上没有 CLI，它也会先用 `npx` 把问题回答掉，再回头提一次永久安装。
+
 ## CLI
 
 ```bash

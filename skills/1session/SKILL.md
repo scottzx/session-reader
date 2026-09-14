@@ -1,6 +1,6 @@
 ---
 name: 1session
-description: Search and read the user's past AI coding sessions across Claude Code, Codex, Antigravity, Grok and DeepSeek Harness (dsh) from their raw local session files, using the `1session` CLI. Use this whenever the user refers to work they did in an earlier session rather than in this conversation — "上次/之前/昨天我们改了什么", "那个报错后来怎么解决的", "我在哪个会话里提过 X", "这个功能是哪一轮加的", "codex 那边做到哪了", "grok/dsh 那边呢", "跨项目找一下", "整理一下最近几天的会话/写个周报". Also reach for it proactively, before asking the user to re-explain context they have obviously already established with some agent on this machine — the answer is usually already on disk. Read-only: it never modifies or resumes a session.
+description: Search and read the user's past AI coding sessions across Claude Code, Codex, Antigravity, Grok and DeepSeek Harness (dsh) from their raw local session files, using the `1session` CLI. Use this whenever the user refers to work they did in an earlier session rather than in this conversation — "上次/之前/昨天我们改了什么", "那个报错后来怎么解决的", "我在哪个会话里提过 X", "这个功能是哪一轮加的", "codex 那边做到哪了", "grok/dsh 那边呢", "跨项目找一下", "整理一下最近几天的会话/写个周报". Also reach for it proactively, before asking the user to re-explain context they have obviously already established with some agent on this machine — the answer is usually already on disk. Read-only: it never modifies or resumes a session. This skill also covers getting itself running and spreading to other agents: when the `1session` CLI is missing it falls back to `npx` on the spot, and it knows how to install the package globally and push the skill into all five agents at once — so use it too when the user asks to install, upgrade, uninstall, share or distribute 1session / session-reader, or reports that the `1session` command is not found.
 ---
 
 # 1session — the cross-agent Read Plane
@@ -19,15 +19,52 @@ normalizes all of them and answers questions about what actually happened.
 Everything is derived from the raw files at read time. Nothing is written back to
 them, no daemon is involved, and no session is ever resumed or modified.
 
-## Before the first call
+## Bootstrap: get the CLI, then answer the question
 
-Run `1session help`. If the command is missing, fall back to
-`npx -y @1agents/session-reader` in place of `1session` everywhere below, and
-mention the one-time fix once: `npm i -g @1agents/session-reader`.
+This skill travels on its own. Someone may have dropped `SKILL.md` into an agent
+on a machine where the `1session` CLI does not exist, so the first call is a
+probe rather than an assumption:
 
-The first run on a machine parses every session (~10s for a few hundred); after
-that an index makes each call sub-second. If a call feels slow, it is that first
-build, not a hang.
+```bash
+1session help
+```
+
+If that fails, **do not stop to install before answering.** `npx` runs the same
+CLI with nothing installed:
+
+```bash
+npx -y @1agents/session-reader@latest list --global --limit 10
+```
+
+Substitute `npx -y @1agents/session-reader@latest` for `1session` everywhere
+below, answer the question the user actually asked, and offer the permanent
+install once, afterwards. Someone asking where last week's bug got fixed wants
+the bug, not a setup errand.
+
+The permanent install, when they want it:
+
+```bash
+npm i -g @1agents/session-reader   # requires Node >= 22.15
+1session skill install             # put this skill into every agent on the machine
+```
+
+Node below 22.15 is a hard stop rather than a warning — the reader needs
+`node:sqlite` for the index and `node:zlib`'s zstd to read dsh's compressed
+sessions, and `npx` does not rescue an old runtime either. Check `node -v`, say
+plainly that Node needs upgrading, and don't improvise around it.
+
+That second command is what makes this spread: one run installs the skill into
+Claude Code, Codex, Antigravity, Grok and dsh at once, so whichever agent the
+user opens next already knows their history is readable. Run it after a global
+install, **not** through `npx` — npx installs the package into a cache directory
+that npm later garbage-collects, and the skill links would dangle with it.
+
+`references/install.md` has the rest: PATH and permission failures, link vs copy,
+upgrading, uninstalling, and what to hand someone who wants this on their own
+machine. Read it when an install misbehaves or the user asks how to share this.
+
+The first real run parses every session (~10s for a few hundred); an index makes
+each call after that sub-second. A slow first call is that build, not a hang.
 
 ## Pick the command from the question
 
