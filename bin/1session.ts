@@ -26,7 +26,7 @@ const USAGE = `1session — cross-agent session Read Plane
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session index [<session-id>] [--all] [--scope <path>|cwd|global] [--force] [--since 30d]  建立/刷新索引
   1session graph <session-id> [--json]                 会话之间的引用关系
-  1session serve [--port 7777] [--host 127.0.0.1] [--token <t>]
+  1session serve [--port 7777] [--host 127.0.0.1] [--token <t>] [--no-report]
                           起 HTTP Service，把本机会话接入 DreamMate Network
   1session skill install|status|uninstall [--agent claude,codex,antigravity]
                           [--copy] [--force] [--dry-run] [--json]  装到三家智能体的 skills 目录
@@ -51,7 +51,7 @@ interface Args {
 /** Flags that never take a value, so they cannot swallow a positional. */
 const BOOLEAN_FLAGS = new Set([
   'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index', 'global',
-  'copy', 'dry-run',
+  'copy', 'dry-run', 'no-report',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -530,6 +530,7 @@ async function main(): Promise<void> {
         ...(str(flags.host) ? { host: str(flags.host)! } : {}),
         ...(str(flags.token) ? { token: str(flags.token)! } : {}),
         ...(str(flags['base-url']) ? { baseUrl: str(flags['base-url'])! } : {}),
+        ...(flags['no-report'] === true ? { report: false } : {}),
       });
       // The server owns the process from here; nothing after this resolves.
       await new Promise(() => {});

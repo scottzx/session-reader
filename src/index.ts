@@ -126,7 +126,6 @@ export {
 export {
   buildManifest,
   nodeIdentity,
-  nodeIdentityPath,
   sessionUri,
   SESSION_CAPABILITIES,
   type AccessDescriptor,

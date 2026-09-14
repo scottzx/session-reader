@@ -20,8 +20,8 @@ import { fileWrites, resolveWritePath, stripHeredocs } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
 import { installSkill, skillStatus, uninstallSkill } from '../src/skill.js';
-import { buildManifest, nodeIdentity, sessionUri } from '../src/serve/node.js';
-import { nodeTypeOf, resetTailscaleCache, tailscaleSelf } from '../src/serve/tailscale.js';
+import { buildManifest, sessionUri } from '../src/serve/node.js';
+import { nodeIdentity as sharedIdentity, resetIdentityCache } from '@1agents/dreammate-node';
 import { createServer } from '../src/serve/http.js';
 
 const VALID_KINDS = new Set(['user', 'assistant', 'thinking', 'tool_call', 'tool_result']);
@@ -909,18 +909,10 @@ test('serve stamps a session:// uri onto every listed session', async () => {
 
 /* ---------- Node 身份：tailscale 优先，本地回退 ---------- */
 
-test('nodeTypeOf 把 tailscale 的 OS 映射成 schema 的 node.type', () => {
-  assert.equal(nodeTypeOf('macOS'), 'macos');
-  assert.equal(nodeTypeOf('iOS'), 'ios');
-  assert.equal(nodeTypeOf('linux'), 'linux');
-  assert.equal(nodeTypeOf('windows'), 'windows');
-  // 没见过的值原样降级，不要为了枚举整齐把新平台挡在网络外面。
-  assert.equal(nodeTypeOf('plan9'), 'plan9');
-});
 
 test('nodeIdentity 总能给出可用身份，有没有 tailscale 都一样', async () => {
-  resetTailscaleCache();
-  const identity = await nodeIdentity();
+  resetIdentityCache();
+  const identity = await sharedIdentity();
   assert.ok(identity.node_id, '任何情况下都得有 node_id');
   assert.ok(identity.name, '任何情况下都得有 name');
   assert.ok(identity.type, '任何情况下都得有 type');
@@ -937,35 +929,16 @@ test('环境变量能覆盖节点身份（容器 / 同机第二实例）', async
   process.env.DREAMMATE_NODE_ID = 'node_forced';
   process.env.DREAMMATE_NODE_NAME = 'forced-name';
   try {
-    resetTailscaleCache();
-    const identity = await nodeIdentity();
+    resetIdentityCache();
+    const identity = await sharedIdentity();
     assert.equal(identity.node_id, 'node_forced');
     assert.equal(identity.name, 'forced-name');
   } finally {
     [process.env.DREAMMATE_NODE_ID, process.env.DREAMMATE_NODE_NAME] = saved as [string, string];
-    resetTailscaleCache();
+    resetIdentityCache();
   }
 });
 
-test('tailscale 不可用时静默回退，不抛错', async () => {
-  const savedPath = process.env.PATH;
-  // 把 PATH 清空 = tailscale 找不到，等价于"没装"。
-  process.env.PATH = '/nonexistent';
-  try {
-    resetTailscaleCache();
-    assert.equal(await tailscaleSelf({ force: true }), undefined, '拿不到就该是 undefined');
-    const identity = await nodeIdentity();
-    assert.equal(identity.source, 'local', '应该回退到本地身份');
-    assert.ok(identity.node_id);
-    // 回退路径下 manifest 依然要完整。
-    const manifest = await buildManifest('http://localhost:7777');
-    assert.ok(manifest.node_id && manifest.name && manifest.type);
-    assert.equal(manifest.metadata?.identity_source, 'local');
-  } finally {
-    process.env.PATH = savedPath;
-    resetTailscaleCache();
-  }
-});
 
 test('serve 的默认端口就是 L0 约定的那个', async () => {
   const { DEFAULT_PORT } = await import('../src/serve/http.js');

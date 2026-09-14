@@ -15,7 +15,9 @@ import { searchSessions } from '../search.js';
 import { canonicalizePath } from '../util/paths.js';
 import type { AgentProvider, TurnKind } from '../types.js';
 import { buildManifest, nodeIdentity, sessionUri } from './node.js';
-import { DEFAULT_PORTS } from '@1agents/dreammate-network';
+import { DEFAULT_PORTS, type Reachability } from '@1agents/dreammate-network';
+import { reportAndHoldRegistration } from '@1agents/dreammate-node/client';
+import { SESSION_CAPABILITIES } from './node.js';
 
 /** 约定端口，由 L0 协议包定义——Control Plane 的 pull 探测照着它找服务。 */
 export const DEFAULT_PORT = DEFAULT_PORTS['session-registry'];
@@ -33,6 +35,11 @@ export interface ServeOptions {
   token?: string;
   /** Advertised base url, when behind a proxy or a different tailnet name. */
   baseUrl?: string;
+  /**
+   * 向本机 node agent 报备自己。默认开——agent 没起时是静默 no-op，没有代价。
+   * 报备后外部探一个 36908 就能看见本服务，不必碰运气猜端口。
+   */
+  report?: boolean;
 }
 
 interface Ctx {
@@ -205,9 +212,32 @@ export async function serve(options: ServeOptions = {}): Promise<http.Server> {
   await new Promise<void>((resolve) => server.listen(options.port ?? DEFAULT_PORT, host, resolve));
   const { port } = server.address() as AddressInfo;
   const identity = await nodeIdentity();
+
+  // 只听回环的服务，外部发现得了却连不上——如实说，别让调用方白跑一趟。
+  const reachability: Reachability =
+    host === '127.0.0.1' || host === 'localhost' || host === '::1' ? 'localhost' : 'network';
+  const reported =
+    options.report === false
+      ? undefined
+      : await reportAndHoldRegistration({
+          id: 'session-registry',
+          name: 'session-reader',
+          kind: 'session_registry',
+          capabilities: [...SESSION_CAPABILITIES],
+          port,
+          reachability,
+          resources: [{ scheme: 'session' }],
+        });
   console.log(`1session serve — node ${identity.name} (${identity.node_id})`);
   console.log(`  http://${host}:${port}/manifest`);
   console.log(`  capabilities: sessions.list, sessions.read, sessions.turns, sessions.search, sessions.graph`);
+  if (reported) {
+    console.log(
+      reported.ok
+        ? `  已向本机 node agent 报备（reachability=${reachability}）`
+        : `  未报备：${reported.reason}——不影响本服务，只是外部得靠约定端口找它`,
+    );
+  }
   if (host !== '127.0.0.1' && host !== 'localhost' && !options.token) {
     console.warn(
       `  ⚠️  绑定在 ${host} 且未设置 --token：会话原文（代码、shell 历史、密钥）将对该网络开放。`,

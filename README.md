@@ -414,6 +414,11 @@ $ 1session graph ca8325e1
 1session serve --host 100.x.x.x --token <t>     # 暴露到 tailnet
 ```
 
+启动时默认向本机 [node agent](https://github.com/scottzx/dreammate-node)（36908）报备，
+`--no-report` 可关。**agent 没起时是静默 no-op**，不影响本服务——只是外部得靠约定端口
+碰运气找它，而不是探一个 36908 就看见。报备会如实声明可达性：`--host` 是回环就报
+`localhost`（外部发现得了但连不上），否则报 `network`。
+
 端口 7777 是 [L0 协议](https://github.com/scottzx/dreammate-network) 的**约定端口**
 （`DEFAULT_PORTS['session-registry']`），不是随手挑的：发现是 pull 的——
 Control Plane 从 tailnet 拿到节点后，照着这张表探测 `/manifest` 与 `/health`。
@@ -451,9 +456,9 @@ scott-pc$ curl http://scott-mac.tailfb4720.ts.net:7777/v1/sessions?limit=3
 `调用方 --references--> 目标`，与 CLI 的 `SESSION_READER_CALLER_SESSION` 是同一条路径。
 两端都必须是本地已索引的会话，否则静默跳过——悬空边比没有边更糟。
 
-**节点身份优先取自 tailscale**（`tailscale status --json` 的 `Self`，缓存 60s）：
-tailnet 已经维护了稳定 ID、唯一名字和操作系统，本机所有服务读到同一份，
-不会各自生成 id 把一台机器裂成几个 Node。
+**节点身份由 [`@1agents/dreammate-node`](https://github.com/scottzx/dreammate-node) 统一提供**
+（优先 `tailscale status --json` 的 `Self`，缓存 60s）：它是每台机器的公共事实，
+本机所有服务读到同一份，不会各自生成 id 把一台机器裂成几个 Node。
 
 ```
 node_id   nigVtDS1s521CNTRL                            ← tailscale ID，重启不变
