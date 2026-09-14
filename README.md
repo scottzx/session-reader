@@ -460,9 +460,8 @@ Control Plane 从 tailnet 拿到节点后，照着这张表探测 `/manifest` �
 换成别的端口就探测不到了，得由服务自己 `POST /nodes/register` 告知。
 
 ```
-GET /manifest              Node Manifest（dreammate-network node.schema.json）
+GET /manifest              只报本服务自己（节点全貌在 agent 的 :36908/manifest）
 GET /health
-GET /v1/node               同 /manifest，本 Service 前缀下的同一份文档
 GET /v1/sessions           ?limit&scope&since&provider
 GET /v1/sessions/:id       会话概要
 GET /v1/sessions/:id/turns 逐轮概要

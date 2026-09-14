@@ -1005,15 +1005,19 @@ test('buildManifest satisfies the dreammate-network node contract', async () => 
   assert.ok(!service.capabilities.some((name: string) => /http|mcp|cli/i.test(name)));
 });
 
-test('serve answers /health and /manifest, and /v1/node mirrors /manifest', async () => {
+test('serve answers /health and /manifest, and does not pretend to be the node', async () => {
   await withServer({}, async (base) => {
     const health = await fetch(`${base}/health`);
     assert.equal(health.status, 200);
     assert.equal(((await health.json()) as { status: string }).status, 'ok');
 
-    const manifest = await (await fetch(`${base}/manifest`)).json();
-    const node = await (await fetch(`${base}/v1/node`)).json();
-    assert.deepEqual(manifest, node);
+    const manifest = (await (await fetch(`${base}/manifest`)).json()) as { services: unknown[] };
+    // 只报自己这一个 service；节点全貌在本机 agent 的 :36908/manifest。
+    assert.equal(manifest.services.length, 1);
+
+    // `node` 这个词属于 agent。一个 L2 服务暴露 /v1/node 会让人以为
+    // 能从这儿拿到节点全貌，其实只有它自己。
+    assert.equal((await fetch(`${base}/v1/node`)).status, 404);
   });
 });
 

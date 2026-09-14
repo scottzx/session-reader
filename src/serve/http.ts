@@ -95,9 +95,8 @@ async function route(ctx: Ctx): Promise<{ status: number; body: unknown }> {
     return { status: 200, body: { status: 'ok', node_id: identity.node_id, service: 'session-registry' } };
   }
 
-  // `/manifest` is the network-wide contract; `/v1/node` is the same document
-  // under this service's own prefix.
-  if (pathname === '/manifest' || pathname === '/v1/node') {
+  // 只报本服务自己——节点全貌在本机 agent 的 :36908/manifest。
+  if (pathname === '/manifest') {
     return { status: 200, body: await buildManifest(ctx.url.origin) };
   }
 
