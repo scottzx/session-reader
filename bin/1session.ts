@@ -4,7 +4,7 @@ import path from 'node:path';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { buildOverview } from '../src/overview.js';
-import { eventDetail, summarizeTurns, turnDetail } from '../src/turns.js';
+import { eventDetails, summarizeTurns, turnDetail } from '../src/turns.js';
 import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { listRecentSessions, loadSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
@@ -17,7 +17,8 @@ const USAGE = `1session — cross-agent session Read Plane
   1session list [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--since 24h] [--json]
   1session overview <session-id> [--json]              第 1 层：会话概要
   1session turns <session-id> [--json]                 第 2 层：逐轮概要
-  1session turn <session-id> <n> [--event <k>] [--json] 第 3 层：单轮 / 单次工具调用明细
+  1session turn <session-id> <n> [--event <k|a-b|a,b,c>] [--json]
+                          第 3 层：单轮 / 单次或多次工具调用明细
   1session jobs <session-id> [--json]                  异步作业账本
   1session commands <session-id> [--failed] [--host h] [--turn n] [--json]
   1session files <session-id> [--group project|runtime|log|all] [--json]
@@ -32,7 +33,11 @@ const USAGE = `1session — cross-agent session Read Plane
                           [--copy] [--force] [--dry-run] [--json]  装到三家智能体的 skills 目录
   1session search <query> [--scope <path>|cwd|global] [--since 24h] [--limit n] [--provider name]
                           [--kind user,assistant,thinking,tool_call,tool_result]
-                          [--regex] [--case] [--context n] [--max-hits n] [--json]
+                          [--regex] [--case] [--context n] [--max-hits n]
+                          [--include-self] [--json]
+
+search 的每条命中带 T<轮次> · E<事件号>，可直接拼成 1session turn <id> <T> --event <E>。
+默认折叠本次检索自身在活跃会话里留下的回声，--include-self 展开。
 
 全局：--no-index 绕过索引直读源文件。索引位于 ~/.1agents/session-reader/index.db
      list / search / index --all 默认只看当前 pwd 目录（含子目录）下的会话。
@@ -51,7 +56,7 @@ interface Args {
 /** Flags that never take a value, so they cannot swallow a positional. */
 const BOOLEAN_FLAGS = new Set([
   'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index', 'global',
-  'copy', 'dry-run', 'no-report',
+  'copy', 'dry-run', 'no-report', 'include-self',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -101,6 +106,13 @@ const kindsOf = (value: string | boolean | undefined): TurnKind[] | undefined =>
     ?.split(',')
     .map((kind) => kind.trim())
     .filter(Boolean) as TurnKind[] | undefined;
+/**
+ * The drill-down handle a hit carries: `T9 · E221` reads straight into
+ * `1session turn <id> 9 --event 221`. Turn first, because that is the order
+ * the command wants it in.
+ */
+const handle = (turn: number, event: number): string => `T${turn || '?'} · E${event}`;
+
 const focusOf = (value: string | boolean | undefined): DigestFocus => {
   const focus = str(value);
   return focus === 'marketing' || focus === 'full' ? focus : 'review';
@@ -340,20 +352,27 @@ async function main(): Promise<void> {
 
     case 'turn': {
       const session = await load(positional[0]);
-      const eventIndex = num(flags.event);
-      if (eventIndex !== undefined) {
-        const detail = await eventDetail(session, eventIndex);
-        const body = detail.fullText ?? detail.text ?? detail.toolResult ?? '';
+      const spec = str(flags.event);
+      if (spec !== undefined) {
+        const details = await eventDetails(session, spec);
+        // A bare index keeps returning one object; a range or a list — which
+        // the caller had to ask for explicitly — returns the array.
+        const single = /^\s*\d+\s*$/.test(spec);
         print(
           json,
-          detail,
-          [
-            `#${detail.index} ${detail.kind}${detail.toolName ? `(${detail.toolName})` : ''} ${detail.timestamp ?? ''}` +
-              `${detail.truncated ? (detail.fullText ? '  [已从 steps/ 补全]' : '  [已截断]') : ''}`,
-            ...(detail.toolArgs ? ['', '参数：', JSON.stringify(detail.toolArgs, null, 2)] : []),
-            ...(body ? ['', '内容：', body] : []),
-            ...(detail.truncationNote ? ['', `⚠️ ${detail.truncationNote}`] : []),
-          ].join('\n'),
+          single ? details[0] : details,
+          details
+            .map((detail) => {
+              const body = detail.fullText ?? detail.text ?? detail.toolResult ?? '';
+              return [
+                `#${detail.index} ${detail.kind}${detail.toolName ? `(${detail.toolName})` : ''} ${detail.timestamp ?? ''}` +
+                  `${detail.truncated ? (detail.fullText ? '  [已从 steps/ 补全]' : '  [已截断]') : ''}`,
+                ...(detail.toolArgs ? ['', '参数：', JSON.stringify(detail.toolArgs, null, 2)] : []),
+                ...(body ? ['', '内容：', body] : []),
+                ...(detail.truncationNote ? ['', `⚠️ ${detail.truncationNote}`] : []),
+              ].join('\n');
+            })
+            .join('\n\n────────\n\n'),
         );
         break;
       }
@@ -373,7 +392,8 @@ async function main(): Promise<void> {
             return `${head}  ${oneLine(event.text ?? event.toolResult ?? JSON.stringify(event.toolArgs), 160)}`;
           }),
           '',
-          `（用 --event <k> 展开单个事件的完整内容）`,
+          `（--event <k> 展开单个事件的完整内容；--event ${detail.summary.events[0]}-` +
+            `${Math.min(detail.summary.events[0] + 2, detail.summary.events[1])} 或 --event a,b,c 一次读相邻几条）`,
         ].join('\n'),
       );
       break;
@@ -381,7 +401,8 @@ async function main(): Promise<void> {
 
     case 'search': {
       const query = positional.join(' ');
-      const hits = await searchSessions(query, {
+      const includeSelf = flags['include-self'] === true;
+      const found = await searchSessions(query, {
         workspace: scopeWorkspace(flags),
         since: str(flags.since),
         limit: num(flags.limit),
@@ -393,13 +414,27 @@ async function main(): Promise<void> {
         maxPerSession: num(flags['max-hits']),
         useIndex,
       });
+      // The searcher's own live transcript is noise by default: the query is
+      // in it because this very command put it there.
+      const hits = includeSelf ? found : found.filter((hit) => !hit.self);
       const total = hits.reduce((sum, hit) => sum + hit.totalMatches, 0);
+      const foldedSessions = found.length - hits.length;
+      const foldedMatches = found.reduce(
+        (sum, hit) => sum + (hit.suppressed ?? 0) + (hits.includes(hit) ? 0 : hit.totalMatches),
+        0,
+      );
+      const foldNote =
+        !includeSelf && foldedMatches
+          ? `（已折叠 ${foldedMatches} 处本次检索自身留下的回声` +
+            `${foldedSessions ? `，涉及 ${foldedSessions} 个会话` : ''}；--include-self 展开）`
+          : undefined;
       print(
         json,
         hits,
         hits.length
           ? [
               `${total} 处命中，分布在 ${hits.length} 个会话`,
+              ...(foldNote ? [foldNote] : []),
               ...hits.flatMap((hit) => [
                 '',
                 `### ${hit.session.provider} ${hit.session.id.slice(0, 8)}  ` +
@@ -407,14 +442,24 @@ async function main(): Promise<void> {
                 `    ${oneLine(hit.session.title, 80)}`,
                 ...hit.matches.map(
                   (match) =>
-                    `  #${match.index} ${match.kind}${match.toolName ? `(${match.toolName})` : ''}  ${match.excerpt}`,
+                    `  ${handle(match.turn, match.index)} ` +
+                    `${match.kind}${match.toolName ? `(${match.toolName})` : ''}  ${match.excerpt}`,
                 ),
+                ...(hit.matches[0]
+                  ? [
+                      `    ↳ 1session turn ${hit.session.id.slice(0, 8)} ` +
+                        `${hit.matches[0].turn || '<轮次>'} --event ${hit.matches[0].index}`,
+                    ]
+                  : []),
                 ...(hit.totalMatches > hit.matches.length
                   ? [`  …另有 ${hit.totalMatches - hit.matches.length} 处（--max-hits 调大或 --json 查看全部）`]
                   : []),
+                ...(!includeSelf && hit.suppressed
+                  ? [`  …另折叠 ${hit.suppressed} 处本次检索自身的回声（--include-self 展开）`]
+                  : []),
               ]),
             ].join('\n')
-          : `无命中：${query}`,
+          : [`无命中：${query}`, ...(foldNote ? [foldNote] : [])].join('\n'),
       );
       break;
     }

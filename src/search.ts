@@ -1,6 +1,7 @@
 import { adapters, listResolvedSessions, parseSince, type ListOptions } from './resolver.js';
+import { turnNoAt, turnStarts } from './turns.js';
 import { canonicalizePath, isInside } from './util/paths.js';
-import type { SessionRef, TurnEvent, TurnKind } from './types.js';
+import type { NormalizedSession, SessionRef, TurnEvent, TurnKind } from './types.js';
 
 export interface SearchOptions extends ListOptions {
   /** Bypass the index and parse every candidate from disk. */
@@ -14,10 +15,21 @@ export interface SearchOptions extends ListOptions {
   context?: number;
   /** Matches recorded per session before scanning moves on. */
   maxPerSession?: number;
+  /**
+   * The session doing the searching, so its own live transcript can be marked.
+   * Defaults to `SESSION_READER_CALLER_SESSION`; pass `''` to disable.
+   */
+  selfSessionId?: string;
 }
 
 export interface SearchMatch {
   index: number;
+  /**
+   * The turn this event belongs to — the other half of the drill-down handle,
+   * so `T<turn> · E<index>` maps straight onto `turn <id> <turn> --event <index>`.
+   * 0 when the session records no turn that contains the event.
+   */
+  turn: number;
   kind: TurnKind;
   toolName?: string;
   timestamp?: string;
@@ -28,6 +40,14 @@ export interface SearchHit {
   session: SessionRef;
   matches: SearchMatch[];
   totalMatches: number;
+  /** Matches dropped because they were this very search echoing back. */
+  suppressed?: number;
+  /**
+   * The searcher's own session: either the injected caller id, or a session
+   * whose every match was the running invocation. Never removed from the
+   * result — callers hide it, so the count stays reportable.
+   */
+  self?: boolean;
 }
 
 const DEFAULT_CONTEXT = 100;
@@ -165,7 +185,7 @@ export function planQuery(query: string, options: SearchOptions = {}): QueryPlan
 // Matching
 // ---------------------------------------------------------------------------
 
-interface Candidate {
+export interface Candidate {
   index: number;
   kind: TurnKind;
   toolName?: string;
@@ -173,30 +193,130 @@ interface Candidate {
   body: string;
 }
 
+interface Bucket {
+  matches: SearchMatch[];
+  totalMatches: number;
+  suppressed: number;
+}
+
+// ---------------------------------------------------------------------------
+// The searcher's own footprint
+// ---------------------------------------------------------------------------
+
+/**
+ * How recent a `1session` invocation has to be to be this very search rather
+ * than a historical one. The agent's tool call is written to its transcript
+ * seconds before the command runs, so the window only has to survive the
+ * indexing sweep — but a past session that genuinely ran the same query must
+ * stay a real hit, which is what keeps this narrow.
+ */
+const SELF_ECHO_WINDOW_MS = 5 * 60_000;
+/** How far after the invocation its own output may land, as in `commandLedger`. */
+const RESULT_SPAN = 3;
+const INVOCATION = /(?:^|[\s"'`/])1session\s/;
+
+/**
+ * A `1session` invocation written in the last few minutes.
+ *
+ * Only the live transcript can hold one: a session that ended yesterday cannot
+ * have an event timestamped now, so the window is what separates "this
+ * investigation, happening" from "someone once ran this", and no past session
+ * is ever touched by it.
+ */
+function isRunningInvocation(candidate: Candidate, now: number): boolean {
+  if (candidate.kind !== 'tool_call' || !candidate.timestamp) return false;
+  const at = Date.parse(candidate.timestamp);
+  if (!Number.isFinite(at) || at < now - SELF_ECHO_WINDOW_MS || at > now + 60_000) return false;
+  return INVOCATION.test(candidate.body);
+}
+
+/**
+ * Folds the Read Plane's own footprint out of one session: an invocation
+ * running right now, and the result carrying what it printed.
+ *
+ * It deliberately does not require the invocation to carry *this* query. A
+ * `1session` call from a minute ago prints other sessions' content verbatim,
+ * so it matches queries it never mentioned — and whatever it echoed is still
+ * in the session it was quoting from, where the search finds it properly, with
+ * a handle that drills down to the real thing instead of to a screenful of
+ * this tool's output.
+ *
+ * Stateful because the second half is only knowable from the first, so it is
+ * built fresh per session and fed events in index order — which both search
+ * paths already produce.
+ */
+export function echoFolder(now: number): (candidate: Candidate) => boolean {
+  let lastEcho = Number.NEGATIVE_INFINITY;
+  return (candidate) => {
+    if (isRunningInvocation(candidate, now)) {
+      lastEcho = candidate.index;
+      return true;
+    }
+    return candidate.kind === 'tool_result' && candidate.index - lastEcho <= RESULT_SPAN;
+  };
+}
+
+/**
+ * Whether a session is the one running the search. Accepts the canonical
+ * `provider:native_id`, the bare native id, or a 6+ character prefix of it —
+ * the same spellings `resolveSession` takes.
+ */
+export function isCallerSession(ref: SessionRef, callerId: string | undefined): boolean {
+  const caller = callerId?.trim().toLowerCase();
+  if (!caller) return false;
+  const native = ref.id.toLowerCase();
+  const canonical = `${ref.provider}:${native}`;
+  const bare = caller.includes(':') ? caller.slice(caller.indexOf(':') + 1) : caller;
+  return caller === canonical || bare === native || (bare.length >= 6 && native.startsWith(bare));
+}
+
 function accumulate(
-  hits: Map<string, { matches: SearchMatch[]; totalMatches: number }>,
+  hits: Map<string, Bucket>,
   sessionId: string,
   candidate: Candidate,
   pattern: RegExp,
   context: number,
   maxPerSession: number,
+  echo: (candidate: Candidate) => boolean,
 ): void {
   if (!candidate.body) return;
   pattern.lastIndex = 0;
   const found = pattern.exec(candidate.body);
   if (!found) return;
-  const bucket = hits.get(sessionId) ?? { matches: [], totalMatches: 0 };
+  const bucket = hits.get(sessionId) ?? { matches: [], totalMatches: 0, suppressed: 0 };
+  hits.set(sessionId, bucket);
+  if (echo(candidate)) {
+    bucket.suppressed++;
+    return;
+  }
   bucket.totalMatches++;
   if (bucket.matches.length < Math.min(maxPerSession, HARD_CAP)) {
     bucket.matches.push({
       index: candidate.index,
+      turn: 0, // filled in once the session's turn boundaries are known
       kind: candidate.kind,
       ...(candidate.toolName ? { toolName: candidate.toolName } : {}),
       ...(candidate.timestamp ? { timestamp: candidate.timestamp } : {}),
       excerpt: excerpt(candidate.body, found.index, found[0].length, context),
     });
   }
-  hits.set(sessionId, bucket);
+}
+
+/** Stamps the drill-down handle onto every match of one session. */
+function assignTurns(matches: SearchMatch[], starts: number[]): void {
+  for (const match of matches) match.turn = turnNoAt(starts, match.index);
+}
+
+/** A bucket as it leaves the search: empty ones only survive to be counted. */
+function toHit(session: SessionRef, bucket: Bucket, caller: string | undefined): SearchHit {
+  const self = isCallerSession(session, caller) || (bucket.totalMatches === 0 && bucket.suppressed > 0);
+  return {
+    session,
+    matches: bucket.matches,
+    totalMatches: bucket.totalMatches,
+    ...(bucket.suppressed ? { suppressed: bucket.suppressed } : {}),
+    ...(self ? { self: true } : {}),
+  };
 }
 
 /**
@@ -211,25 +331,41 @@ export async function searchSessions(query: string, options: SearchOptions = {})
   const pattern = buildPattern(query, options);
   const context = options.context ?? DEFAULT_CONTEXT;
   const maxPerSession = options.maxPerSession ?? DEFAULT_MAX_PER_SESSION;
+  const now = Date.now();
+  const plan: MatchPlan = {
+    pattern,
+    context,
+    maxPerSession,
+    newEchoFolder: () => echoFolder(now),
+    caller: options.selfSessionId ?? process.env.SESSION_READER_CALLER_SESSION,
+  };
 
   const direct = options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1';
   const hits = direct
-    ? await searchByParsing(query, options, pattern, context, maxPerSession)
-    : await searchByIndex(query, options, pattern, context, maxPerSession);
+    ? await searchByParsing(options, plan)
+    : await searchByIndex(query, options, plan);
 
-  return hits
-    .sort((a, b) => Date.parse(b.session.updatedAt ?? '') - Date.parse(a.session.updatedAt ?? ''))
-    .slice(0, options.limit ?? hits.length);
+  hits.sort((a, b) => Date.parse(b.session.updatedAt ?? '') - Date.parse(a.session.updatedAt ?? ''));
+  // `limit` caps the sessions a caller has to read, so it counts the ones that
+  // will actually be shown; a folded self-hit carries nothing but its tally and
+  // must not push a real session out of the answer.
+  const limit = options.limit ?? Number.POSITIVE_INFINITY;
+  let shown = 0;
+  return hits.filter((hit) => (hit.self ? true : ++shown <= limit));
+}
+
+/** Everything the matcher needs that does not change between sessions. */
+interface MatchPlan {
+  pattern: RegExp;
+  context: number;
+  maxPerSession: number;
+  /** One folder per session: the state it keeps must not leak across them. */
+  newEchoFolder: () => (candidate: Candidate) => boolean;
+  caller: string | undefined;
 }
 
 /** The oracle: parses every candidate from disk, touching no stored state. */
-async function searchByParsing(
-  _query: string,
-  options: SearchOptions,
-  pattern: RegExp,
-  context: number,
-  maxPerSession: number,
-): Promise<SearchHit[]> {
+async function searchByParsing(options: SearchOptions, plan: MatchPlan): Promise<SearchHit[]> {
   const kinds = options.kinds?.length ? new Set(options.kinds) : undefined;
   const hits: SearchHit[] = [];
   const handles = await listResolvedSessions({
@@ -238,9 +374,12 @@ async function searchByParsing(
     scan: Number.POSITIVE_INFINITY,
   });
   for (const handle of handles) {
-    const session = await handle.adapter.parse(handle.candidate).catch(() => undefined);
+    const session: NormalizedSession | undefined = await handle.adapter
+      .parse(handle.candidate)
+      .catch(() => undefined);
     if (!session) continue;
-    const bucket = new Map<string, { matches: SearchMatch[]; totalMatches: number }>();
+    const bucket = new Map<string, Bucket>();
+    const echo = plan.newEchoFolder();
     for (const turn of session.turns) {
       if (kinds && !kinds.has(turn.kind)) continue;
       accumulate(
@@ -253,13 +392,16 @@ async function searchByParsing(
           ...(turn.timestamp ? { timestamp: turn.timestamp } : {}),
           body: haystack(turn),
         },
-        pattern,
-        context,
-        maxPerSession,
+        plan.pattern,
+        plan.context,
+        plan.maxPerSession,
+        echo,
       );
     }
     const found = bucket.get(session.ref.id);
-    if (found) hits.push({ session: session.ref, ...found });
+    if (!found) continue;
+    assignTurns(found.matches, turnStarts(session));
+    hits.push(toHit(session.ref, found, plan.caller));
   }
   return hits;
 }
@@ -273,14 +415,12 @@ async function searchByParsing(
 async function searchByIndex(
   query: string,
   options: SearchOptions,
-  pattern: RegExp,
-  context: number,
-  maxPerSession: number,
+  plan: MatchPlan,
 ): Promise<SearchHit[]> {
   const { openStore } = await import('./store/db.js');
   const { refreshSession } = await import('./store/indexer.js');
   const { searchRows } = await import('./store/rows.js');
-  const { refOf } = await import('./store/read.js');
+  const { refOf, turnStartsOf } = await import('./store/read.js');
   const db = await openStore();
 
   const sinceMs = parseSince(options.since);
@@ -296,16 +436,21 @@ async function searchByIndex(
     }
   }
 
-  const plan = planQuery(query, options);
+  const prefilter = planQuery(query, options);
   const workspace = options.workspace ? canonicalizePath(options.workspace) : undefined;
-  const buckets = new Map<string, { matches: SearchMatch[]; totalMatches: number }>();
+  const buckets = new Map<string, Bucket>();
+  let folding = { sessionId: '', echo: plan.newEchoFolder() };
   for (const row of searchRows(db, {
     ids,
     ...(workspace ? { workspace } : {}),
     ...(options.kinds?.length ? { kinds: options.kinds } : {}),
-    ...(plan.literal ? { literal: plan.literal } : {}),
-    ...(plan.fold ? { fold: true } : {}),
+    ...(prefilter.literal ? { literal: prefilter.literal } : {}),
+    ...(prefilter.fold ? { fold: true } : {}),
   })) {
+    // `searchRows` orders by (session_id, idx), which is what the folder needs.
+    if (row.session_id !== folding.sessionId) {
+      folding = { sessionId: row.session_id, echo: plan.newEchoFolder() };
+    }
     const args = row.tool_args_json ?? '';
     accumulate(
       buckets,
@@ -318,9 +463,10 @@ async function searchByIndex(
         // Rebuilt exactly as `haystack` does, so an excerpt cannot shift.
         body: [row.text ?? undefined, row.tool_result ?? undefined, args].filter(Boolean).join('\n'),
       },
-      pattern,
-      context,
-      maxPerSession,
+      plan.pattern,
+      plan.context,
+      plan.maxPerSession,
+      folding.echo,
     );
   }
 
@@ -332,7 +478,10 @@ async function searchByIndex(
     if (!row) continue;
     const ref = refOf(row);
     if (workspace && !isInside(workspace, ref.workspace ?? '')) continue;
-    hits.push({ session: ref, ...bucket });
+    // Only the sessions that actually matched pay for this — a handful of
+    // index lookups, not the 622-session rebuild the row path exists to avoid.
+    assignTurns(bucket.matches, turnStartsOf(db, id, row.event_count));
+    hits.push(toHit(ref, bucket, plan.caller));
   }
   return hits;
 }

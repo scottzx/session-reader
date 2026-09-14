@@ -40,10 +40,23 @@ workspace basename, title.
 1session search <query> [--scope <path>|cwd|global] [--global] [--since 24h]
                 [--limit n] [--provider name]
                 [--kind user,assistant,thinking,tool_call,tool_result]
-                [--regex] [--case] [--context n] [--max-hits n] [--json]
+                [--regex] [--case] [--context n] [--max-hits n]
+                [--include-self] [--json]
 ```
 
 Full-text across sessions; prints matching turns with surrounding context.
+
+Every hit carries `T<turn> · E<event>`, in the order the drill-down wants, and
+each session ends with the command already assembled:
+
+```text
+### claude 3ab9fe0e  2026-09-13T03:33:32Z → 2026-09-13T05:52:59Z  (2 命中)
+  T9 · E491 tool_call(Bash)  …curl --max-time 5 …
+    ↳ 1session turn 3ab9fe0e 9 --event 491
+```
+
+`T?` means the session recorded no turn containing that event — drill in with
+`turns` first. In `--json`, the handle is `match.turn` and `match.index`.
 
 - `--kind user` is the sharpest filter for "what did I ask about X" — it drops
   the tool noise and leaves only the human's own words.
@@ -54,6 +67,13 @@ Full-text across sessions; prints matching turns with surrounding context.
 - `--max-hits n` raises the per-session cap when a session is truncated with
   "另有 N 处".
 - `--context n` widens the excerpt around each hit.
+- `--include-self` stops hiding the search's own footprint. By default a
+  `1session` invocation written in the last five minutes, and the result
+  carrying what it printed, are folded out of the hits — the calling agent's
+  session is indexed live, so the query is in it because this command put it
+  there. Only the live transcript can hold an event timestamped now, so no past
+  session is affected, and the count of what was folded is always printed. In
+  `--json` these sessions stay in the array, tagged `self` and `suppressed`.
 
 Search is a SQL prefilter that narrows candidate lines, then a regex verifier
 that decides. Empty queries are rejected rather than matching everything.
@@ -89,11 +109,18 @@ Layer 2. One line per turn: time, duration, event range, file/command/failure
 counts, what the user said, what the agent replied. Use it to find the turn
 number to drill into.
 
-### `turn <id> <n> [--event k]`
+### `turn <id> <n> [--event k|a-b|a,b,c]`
 
-Layer 3. Every event in a turn. With `--event k`, a single tool call with full
-arguments and **untruncated** result — this is the only way to see what a command
+Layer 3. Every event in a turn. With `--event`, the named events with full
+arguments and **untruncated** results — the only way to see what a command
 actually printed.
+
+`--event` takes one index (`491`), a range (`491-493`), a list (`491,495,502`),
+or a mix, up to 50 events in one call; ranges are clipped to the session, so
+`560-999` means "to the end". Reading a tool call usually means reading its
+result and the assistant's verdict too, which is the range form in one process
+instead of three. `--json` returns an object for a bare index and an array for
+anything that asked for more than one.
 
 ### `digest <id> [--focus marketing|review|full]`
 
@@ -138,13 +165,20 @@ import the library instead of shelling out repeatedly:
 import {
   listRecentSessions, findSessionsByWorkspace, loadSession, parseSession,
   distillSession, aggregateWorkspaceSessions, searchSessions,
-  buildOverview, summarizeTurns, turnDetail, eventDetail,
+  buildOverview, summarizeTurns, turnDetail, eventDetail, eventDetails,
+  turnStarts, turnNoAt,
 } from '@1agents/session-reader';
 
 const hits = await searchSessions('小红书', { workspace: process.cwd(), since: '24h', kinds: ['user'] });
+hits[0].matches[0].turn;                       // the T of the T·E handle
 const overview = buildOverview(await loadSession('01a0907c'));
 const full = await eventDetail(session, 11);   // untruncated tool output
+const around = await eventDetails(session, '11-13');
 ```
+
+`searchSessions` takes `selfSessionId` to name the caller explicitly (it
+defaults to `SESSION_READER_CALLER_SESSION`); hits from it come back tagged
+`self` rather than dropped, so a caller decides whether to show them.
 
 `loadSession` goes through the index; `parseSession` reads the source file
 directly. Requires Node.js >= 22.5 (built-in `node:sqlite`), zero runtime deps.

@@ -59,17 +59,50 @@ function assessTurn(
 }
 
 /**
+ * Turn boundaries from the user messages that open them.
+ *
+ * Split out from `turnStarts` so the index path can feed it the same indices
+ * straight from SQL without materializing the session: a `T` printed by
+ * `search` then means exactly what a `T` printed by `turns` means.
+ */
+export function turnStartsFrom(userEventIndices: number[], eventCount: number): number[] {
+  const starts = [...userEventIndices];
+  if (!starts.length) return eventCount ? [0] : [];
+  // Anything before the first user message belongs to turn 1.
+  if (starts[0] !== 0 && eventCount) starts[0] = 0;
+  return starts;
+}
+
+/**
  * Turn boundaries: codex records them natively, the others start a new turn on
  * every user message.
  */
-function boundaries(session: NormalizedSession): number[] {
-  const starts = session.turns
-    .filter((turn) => turn.kind === 'user' && turn.text?.trim())
-    .map((turn) => turn.index);
-  if (!starts.length && session.turns.length) return [0];
-  // Anything before the first user message belongs to turn 1.
-  if (starts[0] !== 0 && session.turns.length) starts[0] = 0;
-  return starts;
+export function turnStarts(session: NormalizedSession): number[] {
+  return turnStartsFrom(
+    session.turns.filter((turn) => turn.kind === 'user' && turn.text?.trim()).map((turn) => turn.index),
+    session.turns.length,
+  );
+}
+
+/**
+ * The turn (1-based) an event index falls in, or 0 when it falls before the
+ * first one. Turns tile the event stream, so "the last start at or before the
+ * index" is the whole rule.
+ */
+export function turnNoAt(starts: number[], index: number): number {
+  let lo = 0;
+  let hi = starts.length - 1;
+  let found = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid]! <= index) {
+      found = mid + 1;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found;
 }
 
 /**
@@ -79,14 +112,14 @@ function boundaries(session: NormalizedSession): number[] {
  */
 function boundariesByTurn(
   declared: TurnBoundary[],
-  turnStarts: (string | undefined)[],
+  startTimes: (string | undefined)[],
 ): Map<number, TurnBoundary[]> {
   const byTurn = new Map<number, TurnBoundary[]>();
   for (const boundary of declared) {
     if (!boundary.startedAt) continue;
     const at = Date.parse(boundary.startedAt);
-    let owner = turnStarts.findIndex((start) => start !== undefined && Date.parse(start) >= at);
-    if (owner === -1) owner = turnStarts.length - 1;
+    let owner = startTimes.findIndex((start) => start !== undefined && Date.parse(start) >= at);
+    if (owner === -1) owner = startTimes.length - 1;
     const list = byTurn.get(owner) ?? [];
     list.push(boundary);
     byTurn.set(owner, list);
@@ -95,7 +128,7 @@ function boundariesByTurn(
 }
 
 export function summarizeTurns(session: NormalizedSession): TurnSummary[] {
-  const starts = boundaries(session);
+  const starts = turnStarts(session);
   const workspace = session.ref.workspace;
   const declared = session.stats.turnBoundaries;
   const nativeByTurn = boundariesByTurn(
@@ -166,6 +199,53 @@ export interface EventDetail extends TurnEvent {
   fullText?: string;
   /** Set when the transcript is short and the full copy could not be found. */
   truncationNote?: string;
+}
+
+/**
+ * How many events one `--event` spec may expand to. Reading a tool call with
+ * its result and the assistant's verdict takes three; a spec asking for
+ * hundreds wanted `turn <n>` instead, and silently truncating would be worse
+ * than saying so.
+ */
+export const MAX_EVENT_SPAN = 50;
+
+/**
+ * `214`, `214-218`, `214,216,218` and any mix, as ascending unique indices.
+ *
+ * Ranges are clipped to the session — asking for `210-999` on a 300-event
+ * session is a reasonable way to say "to the end" — while a bare index is left
+ * alone so an out-of-range one still errors naming the number that was typed.
+ */
+export function parseEventSpec(spec: string, eventCount: number): number[] {
+  const indices = new Set<number>();
+  for (const part of spec.split(',').map((piece) => piece.trim()).filter(Boolean)) {
+    const range = /^(\d+)\s*[-–]\s*(\d+)$/.exec(part);
+    if (range) {
+      const [from, to] = [Number(range[1]), Number(range[2])].sort((a, b) => a - b) as [number, number];
+      for (let i = Math.max(0, from); i <= Math.min(to, eventCount - 1); i++) indices.add(i);
+      continue;
+    }
+    if (!/^\d+$/.test(part)) {
+      throw new Error(`--event 无法解析：${part}（用 214、214-218 或 214,216,218）`);
+    }
+    indices.add(Number(part));
+  }
+  if (!indices.size) throw new Error(`--event ${spec} 不含该会话的任何事件（0–${eventCount - 1}）`);
+  if (indices.size > MAX_EVENT_SPAN) {
+    throw new Error(
+      `--event ${spec} 展开为 ${indices.size} 个事件，超过上限 ${MAX_EVENT_SPAN}；` +
+        `缩小区间，或用 1session turn <id> <轮次> 看整轮概要`,
+    );
+  }
+  return [...indices].sort((a, b) => a - b);
+}
+
+/** `eventDetail` over a spec: `214`, `214-218`, `214,216,218`. */
+export async function eventDetails(session: NormalizedSession, spec: string): Promise<EventDetail[]> {
+  const indices = parseEventSpec(spec, session.turns.length);
+  const details: EventDetail[] = [];
+  for (const index of indices) details.push(await eventDetail(session, index));
+  return details;
 }
 
 /**

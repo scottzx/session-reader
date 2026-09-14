@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { turnStartsFrom } from '../turns.js';
 import {
   emptyProviderStats,
   type AgentProvider,
@@ -93,6 +94,27 @@ export function listSessionRows(db: DatabaseSync, query: ListQuery): SessionRow[
         'ORDER BY (ended_at IS NULL), ended_at DESC LIMIT ?',
     )
     .all(...params) as unknown as SessionRow[];
+}
+
+/**
+ * Turn starts for one indexed session, without rebuilding it.
+ *
+ * The rule has to stay the rule `turnStarts` applies to a parsed session — a
+ * user event carrying real text opens a turn — so the two are fed to the same
+ * `turnStartsFrom`; only the source of the indices differs.
+ */
+export function turnStartsOf(db: DatabaseSync, sessionId: string, eventCount: number): number[] {
+  const rows = db
+    .prepare(
+      `SELECT idx FROM events
+        WHERE session_id = ? AND kind = 'user' AND trim(coalesce(text, '')) != ''
+        ORDER BY idx`,
+    )
+    .all(sessionId) as unknown as { idx: number }[];
+  return turnStartsFrom(
+    rows.map((row) => row.idx),
+    eventCount,
+  );
 }
 
 export function refOf(row: SessionRow): SessionRef {

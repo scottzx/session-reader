@@ -2,7 +2,7 @@ import path from 'node:path';
 import { isInside } from './util/paths.js';
 import { oneLine } from './util/text.js';
 import { analyzableCommand, fileWrites, rawCommand, resolveWritePath } from './writes.js';
-import { summarizeTurns } from './turns.js';
+import { turnNoAt, turnStarts } from './turns.js';
 import type {
   AsyncJob,
   CommandRecord,
@@ -21,11 +21,8 @@ const TEMP_DIR = /^\/(?:private\/)?(?:tmp|var\/folders)\//;
 
 /** Maps each event index to the turn it belongs to. */
 function turnOf(session: NormalizedSession): (index: number) => number {
-  const ranges = summarizeTurns(session).map((turn) => turn.events);
-  return (index: number) => {
-    const found = ranges.findIndex(([start, end]) => index >= start && index <= end);
-    return found === -1 ? 0 : found + 1;
-  };
+  const starts = turnStarts(session);
+  return (index: number) => (index < 0 ? 0 : turnNoAt(starts, index));
 }
 
 /**

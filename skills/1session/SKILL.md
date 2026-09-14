@@ -29,7 +29,7 @@ build, not a hang.
 
 ## Pick the command from the question
 
-Users ask about the past in roughly five shapes. Match the shape, don't run the
+Users ask about the past in a handful of shapes. Match the shape, don't run the
 whole ladder by reflex:
 
 | The user is asking | Start with |
@@ -37,8 +37,16 @@ whole ladder by reflex:
 | "what have I been doing / what sessions exist" | `list` |
 | "where did I discuss X" (a word, path, error string, package name) | `search` |
 | "what happened in that session" (they named or you found one) | `overview` |
-| "what exactly did it do at step N" | `turns`, then `turn <n>` |
+| "find where we talked about X / which turn was that" | `turns` |
+| "what exactly did it do at step N" | `turn <n>`, then `--event k` |
 | "what did all the agents do in this project" | `workspace` |
+
+"What happened in that session" and "find where we talked about X" look like the
+same question and are not. `overview` compresses a session into statistics and
+an end state — the answer to *what it did*, and the one form that throws away
+what locating a conversation needs. `turns` keeps the ▸user/◂agent rhythm one
+line at a time, so you find the moment by scanning: an order of magnitude faster
+for "where in here did that happen".
 
 `<session-id>` accepts a full id, a prefix of 6+ characters, or a raw file path.
 Session ids shown by `list` and `search` are 8-char prefixes — pass them straight
@@ -51,6 +59,16 @@ reach for it first. Sessions earn their keep on everything git never recorded:
 why a choice was made, what was tried and abandoned, an error and how it was
 worked around, work done over ssh or in a UI, and anything spanning projects or
 agents. The strongest answers use both — git for what changed, sessions for why.
+
+**Sessions date, and the end state dates fastest.** For any question about how
+things *are right now* — a credential, an env var, which version is installed,
+whether a file still exists — a session can only tell you when it was last true.
+Go and check. A transcript records what was said and what exit code came back,
+never the effect: a command can exit 0 having read an empty input and written an
+empty value; a turn can conclude "there are three copies now" when one was a
+shell function that never hit disk; "X is configured" can be accurate and three
+weeks stale. Say which turn the claim comes from and when, then verify it with
+the system itself before the user acts on it.
 
 ## Scope is the thing people get wrong
 
@@ -80,11 +98,32 @@ Each rung narrows the evidence, so climb only as far as the question needs.
 1session overview 3ab9fe0e                   # layer 1: what that session did
 1session turns 3ab9fe0e                      # layer 2: turn-by-turn summary
 1session turn 3ab9fe0e 9 --event 491         # layer 3: one tool call, untruncated
+1session turn 3ab9fe0e 9 --event 491-493     # …with its result and the verdict
 ```
 
-`overview` is the highest-value single call: goal, instruction trail, end state
-(last request, last successful command, last failed command, last file touched),
-and counts of turns/files/commands/failures/commits/tokens.
+Every `search` hit is prefixed with the handle that drills into it, and each
+session prints the command ready to paste:
+
+```text
+### claude 3ab9fe0e  2026-09-13T03:33:32Z → 2026-09-13T05:52:59Z  (2 命中)
+  T9 · E491 tool_call(Bash)  …curl --max-time 5 …
+    ↳ 1session turn 3ab9fe0e 9 --event 491
+```
+
+Reading one tool call usually means reading three events — the call, its result,
+and what the agent concluded — so `--event` takes `491-493` and `491,495,502` as
+well as a single number.
+
+`search` hides the invocation you are running right now (and what it printed)
+from its own results, since a live session is indexed as it happens and would
+otherwise match itself first. It says how many it folded; `--include-self` shows
+them.
+
+`overview` is the highest-value single call *for what a session did*: goal,
+instruction trail, end state (last request, last successful command, last failed
+command, last file touched), and counts of
+turns/files/commands/failures/commits/tokens. For *where in a session something
+happened*, start at `turns` instead.
 
 Useful narrower ledgers when the question is specifically about one dimension:
 `commands <id> [--failed]`, `files <id>`, `errors <id>`, `jobs <id>`,
@@ -108,7 +147,9 @@ you "the session is blocked on Y" — sections that would require interpretation
 say so explicitly instead of guessing. **That interpretation is your job**, and
 you should keep the two layers visibly separate when you answer.
 
-Every fact carries an evidence handle like `E221 · T9` (event 221, turn 9). When
+Every fact carries an evidence handle like `E221 · T9` (event 221, turn 9), and
+so does every search hit — `T9 · E221`, in the order `turn <id> 9 --event 221`
+wants it. When
 you assert something happened, carry the handle or the session id into your
 answer so the user can verify it with one command. A claim about the past that
 can't be traced back to a turn is worth less than saying you didn't find it.

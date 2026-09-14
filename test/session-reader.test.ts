@@ -11,10 +11,18 @@ import type { TurnEvent } from '../src/types.js';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { listRecentSessions, parseSince, resolveSession } from '../src/resolver.js';
-import { searchSessions } from '../src/search.js';
+import { echoFolder, isCallerSession, searchSessions, type Candidate } from '../src/search.js';
 import { buildOverview } from '../src/overview.js';
 import { classifyUserTurn } from '../src/classify.js';
-import { eventDetail, summarizeTurns, turnDetail } from '../src/turns.js';
+import {
+  eventDetail,
+  parseEventSpec,
+  summarizeTurns,
+  turnDetail,
+  turnNoAt,
+  turnStarts,
+  turnStartsFrom,
+} from '../src/turns.js';
 import { commandLedger, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { fileWrites, resolveWritePath, stripHeredocs } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
@@ -212,6 +220,99 @@ test('searchSessions finds a literal taken from a real session', async (t) => {
   assert.ok(hit.matches.every((match) => match.excerpt.length > 0));
 });
 
+test('every search hit carries the turn that `turn --event` wants', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref) return t.skip('no local sessions');
+  const resolved = await resolveSession(ref.id);
+  assert.ok(resolved);
+  const session = await resolved.adapter.parse(resolved.candidate);
+  const ranges = summarizeTurns(session).map((turn) => turn.events);
+  if (!ranges.length) return t.skip('session has no turns');
+
+  const hits = await searchSessions('.', {
+    regex: true,
+    provider: ref.provider,
+    limit: 5,
+    maxPerSession: 5,
+  });
+  const hit = hits.find((candidate) => candidate.session.id === ref.id);
+  if (!hit?.matches.length) return t.skip('no matches in the newest session');
+
+  for (const match of hit.matches) {
+    const range = ranges[match.turn - 1];
+    assert.ok(range, `T${match.turn} is not a turn of the session`);
+    assert.ok(
+      match.index >= range[0] && match.index <= range[1],
+      `E${match.index} claims T${match.turn}, whose events are ${range[0]}–${range[1]}`,
+    );
+    // The handle has to survive the round trip it exists to enable.
+    assert.deepEqual(turnDetail(session, match.turn).summary.events, range);
+  }
+});
+
+test('the index and the parsing path agree on the turn a hit belongs to', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref) return t.skip('no local sessions');
+  const options = { provider: ref.provider, limit: 3, maxPerSession: 3 } as const;
+  const indexed = await searchSessions('.', { ...options, regex: true });
+  const parsed = await searchSessions('.', { ...options, regex: true, useIndex: false });
+  const handles = (hits: Awaited<ReturnType<typeof searchSessions>>) =>
+    hits.map((hit) => [hit.session.id, hit.matches.map((match) => `T${match.turn}·E${match.index}`)]);
+  if (!indexed.length || !parsed.length) return t.skip('no matches to compare');
+  assert.deepEqual(handles(indexed), handles(parsed));
+});
+
+/** One matched event, as the matcher sees it. */
+const candidate = (over: Partial<Candidate> & Pick<Candidate, 'index' | 'kind'>): Candidate => ({
+  body: '',
+  ...over,
+});
+
+test('the folder hides this search running, and nothing a past session did', () => {
+  const now = Date.parse('2026-09-14T12:00:00Z');
+  const justNow = new Date(now - 4_000).toISOString();
+  const lastWeek = '2026-09-07T12:00:00Z';
+  const fold = echoFolder(now);
+
+  const invocation = candidate({
+    index: 10,
+    kind: 'tool_call',
+    timestamp: justNow,
+    body: '{"command":"1session search \\"NPM_TOKEN\\" --global"}',
+  });
+  assert.ok(fold(invocation), 'the invocation writing itself down is not a finding');
+  assert.ok(fold(candidate({ index: 11, kind: 'tool_result', timestamp: justNow, body: 'NPM_TOKEN …' })),
+    'neither is what it printed');
+  assert.ok(!fold(candidate({ index: 40, kind: 'tool_result', timestamp: justNow, body: 'NPM_TOKEN …' })),
+    'a result far from the invocation is somebody else’s output');
+
+  // The window is the whole guarantee that history is never touched.
+  const old = echoFolder(now);
+  assert.ok(
+    !old(candidate({ ...invocation, timestamp: lastWeek })),
+    'a session that ran the same command last week is a real hit',
+  );
+  assert.ok(
+    !old(candidate({ index: 10, kind: 'tool_call', body: '1session search x' })),
+    'an undated event cannot be proven to be happening now',
+  );
+  assert.ok(
+    !echoFolder(now)(candidate({ index: 10, kind: 'tool_call', timestamp: justNow, body: 'npm run build' })),
+    'a shell call that is not 1session is ordinary work',
+  );
+});
+
+test('isCallerSession accepts every spelling of a session id', () => {
+  const ref = { id: '3ab9fe0e-ab9c-4412-bf3b-e041d82e654e', provider: 'claude', path: '/x' } as const;
+  assert.ok(isCallerSession(ref, '3ab9fe0e-ab9c-4412-bf3b-e041d82e654e'));
+  assert.ok(isCallerSession(ref, 'claude:3ab9fe0e-ab9c-4412-bf3b-e041d82e654e'));
+  assert.ok(isCallerSession(ref, '3ab9fe0e'), 'the 8-char prefix `list` prints');
+  assert.ok(!isCallerSession(ref, '3ab9f'), 'too short to be unique, as resolveSession also holds');
+  assert.ok(!isCallerSession(ref, 'deadbeef'));
+  assert.ok(!isCallerSession(ref, undefined));
+  assert.ok(!isCallerSession(ref, '  '));
+});
+
 test('searchSessions honours the kind filter and regex mode', async (t) => {
   const hits = await searchSessions('.', { regex: true, kinds: ['tool_call'], limit: 3, maxPerSession: 3 });
   if (!hits.length) return t.skip('no local sessions with tool calls');
@@ -321,6 +422,53 @@ test('summarizeTurns splits a session on user messages and covers every event', 
   }
   const detail = turnDetail(session, 1);
   assert.equal(detail.events.length, summaries[0]!.eventCount);
+});
+
+test('turn boundaries are one rule, whether the indices come from SQL or a parse', async (t) => {
+  const [ref] = await listRecentSessions({ limit: 1 });
+  if (!ref) return t.skip('no local sessions');
+  const resolved = await resolveSession(ref.id);
+  assert.ok(resolved);
+  const session = await resolved.adapter.parse(resolved.candidate);
+  const starts = turnStarts(session);
+  const fromIndices = turnStartsFrom(
+    session.turns.filter((turn) => turn.kind === 'user' && turn.text?.trim()).map((turn) => turn.index),
+    session.turns.length,
+  );
+  assert.deepEqual(starts, fromIndices);
+  assert.deepEqual(
+    starts,
+    summarizeTurns(session).map((turn) => turn.events[0]),
+    'turn starts must be the starts `turns` prints',
+  );
+  for (const [no, start] of starts.entries()) {
+    assert.equal(turnNoAt(starts, start), no + 1, 'a turn contains its own first event');
+  }
+});
+
+test('turnStartsFrom holds up on the shapes a real session never shows', () => {
+  assert.deepEqual(turnStartsFrom([], 0), [], 'an empty session has no turns');
+  assert.deepEqual(turnStartsFrom([], 9), [0], 'events with no user message are all turn 1');
+  // Provider preamble before the first prompt belongs to turn 1, not to turn 0.
+  assert.deepEqual(turnStartsFrom([4, 20], 30), [0, 20]);
+  assert.equal(turnNoAt([0, 20], 19), 1);
+  assert.equal(turnNoAt([0, 20], 20), 2);
+  assert.equal(turnNoAt([0, 20], -1), 0, 'an index before every turn belongs to none');
+});
+
+test('parseEventSpec accepts a value, a range and a list', () => {
+  assert.deepEqual(parseEventSpec('214', 500), [214]);
+  assert.deepEqual(parseEventSpec('214-218', 500), [214, 215, 216, 217, 218]);
+  assert.deepEqual(parseEventSpec('218-214', 500), [214, 215, 216, 217, 218], 'reversed is the same span');
+  assert.deepEqual(parseEventSpec('214,216, 214', 500), [214, 216], 'duplicates collapse, order is ascending');
+  assert.deepEqual(parseEventSpec('3-5,9', 500), [3, 4, 5, 9]);
+  // A range may overshoot the end — a bare index may not, so it still errors
+  // naming the number that was typed.
+  assert.deepEqual(parseEventSpec('8-99', 10), [8, 9]);
+  assert.deepEqual(parseEventSpec('40', 10), [40]);
+  assert.throws(() => parseEventSpec('44a', 500), /无法解析/);
+  assert.throws(() => parseEventSpec('900-999', 10), /不含该会话的任何事件/);
+  assert.throws(() => parseEventSpec('0-400', 500), /超过上限/);
 });
 
 test('eventDetail recovers antigravity output that the transcript truncated', async (t) => {

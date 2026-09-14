@@ -58,7 +58,17 @@ export {
   jobCounts,
   jobLedger,
 } from './ledger.js';
-export { eventDetail, summarizeTurns, turnDetail, type EventDetail } from './turns.js';
+export {
+  eventDetail,
+  eventDetails,
+  parseEventSpec,
+  summarizeTurns,
+  turnDetail,
+  turnNoAt,
+  turnStarts,
+  turnStartsFrom,
+  type EventDetail,
+} from './turns.js';
 export {
   analyzableCommand,
   fileWrites,
@@ -68,9 +78,12 @@ export {
   type FileWrite,
 } from './writes.js';
 export {
+  echoFolder,
+  isCallerSession,
   mandatoryLiteral,
   planQuery,
   searchSessions,
+  type Candidate,
   type QueryPlan,
   type SearchHit,
   type SearchMatch,

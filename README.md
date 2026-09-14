@@ -69,14 +69,14 @@ npm run build && node dist/bin/1session.js <command>
 | `1session list [--limit n] [--scope <path>\|cwd\|global] [--provider name] [--since 24h] [--json]` | 按最近更新列出各智能体的会话（默认当前 pwd 子树，见 `--scope`） |
 | `1session overview <session-id> [--json]` | **第 1 层**：统计卡片（轮次/文件/命令/提交/产物/上传/后台任务/token）+ 目标、口径修正、状态锚点、全量落盘 |
 | `1session turns <session-id> [--json]` | **第 2 层**：逐轮概要——时间、耗时、事件区间、文件/命令/失败数、用户说了什么、agent 回了什么 |
-| `1session turn <session-id> <n> [--event k] [--json]` | **第 3 层**：展开某一轮的全部事件；`--event` 定位单次工具调用，输出完整参数与**未截断**结果 |
+| `1session turn <session-id> <n> [--event k\|a-b\|a,b,c] [--json]` | **第 3 层**：展开某一轮的全部事件；`--event` 定位工具调用，输出完整参数与**未截断**结果，支持 `491`、`491-493`、`491,495,502` |
 | `1session digest <session-id> [--focus marketing\|review\|full] [--json]` | 单会话蒸馏：目标、改动文件、命令、关键节点 |
 | `1session workspace [path] [--since 24h] [--limit n] [--digest] [--focus f] [--json]` | **按 pwd 跨智能体聚合**（默认 `.`）；带 `--digest` 输出统一故事线 |
 | `1session jobs <id> [--json]` | 异步作业账本：状态 + **证据** + pid / host / log |
 | `1session commands <id> [--failed] [--host h] [--turn n] [--json]` | 命令账本：exit_code / 耗时 / cwd |
 | `1session files <id> [--group project\|runtime\|log\|all] [--json]` | 文件账本，按项目 / 运行态 / 日志分组 |
 | `1session errors <id> [--json]` | 失败命令，带 stderr 与"同前缀命令后续是否成功" |
-| `1session search <query> [--scope <path>\|cwd\|global] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--json]` | 跨会话全文检索：命中轮次 + 上下文片段（默认当前 pwd 子树，见 `--scope`） |
+| `1session search <query> [--scope <path>\|cwd\|global] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--include-self] [--json]` | 跨会话全文检索：命中带 `T<轮次> · E<事件号>` 句柄 + 上下文片段（默认当前 pwd 子树，见 `--scope`） |
 | `1session index [<id>] [--all] [--scope <path>\|cwd\|global] [--force] [--since 30d]` | 建立 / 刷新索引；`--all` 全库回填 |
 | `1session graph <id> [--json]`（别名 `related`） | 会话之间的引用关系 + 每条边的证据 |
 | `1session skill install\|status\|uninstall [--agent a,b] [--copy] [--force] [--dry-run]` | 把内置 skill 装进三家智能体的 skills 目录（见上） |
@@ -158,8 +158,13 @@ T 3 2026-09-11T13:03:29 (283s)  事件 29–45  文件 1 · 命令 7 · 失败 0
 ```
 
 ```bash
-1session turn 5575981e 1 --event 11   # 第 3 层：单次工具调用的完整输出
+1session turn 5575981e 1 --event 11      # 第 3 层：单次工具调用的完整输出
+1session turn 5575981e 1 --event 11-13   # 连着看：调用 + 结果 + 助理的判断
 ```
+
+`--event` 收 `11`、`11-13`、`11,15,22` 及其混合，一次最多 50 条；区间会按会话长度裁剪，
+所以 `560-999` 就是「看到结尾」。读一次工具调用通常要连读它的结果和后面那条助理判断——
+一个进程读完，而不是起三次。
 
 第三层会自动补全被截断的内容：antigravity 的 `transcript.jsonl` 会把长输出截短（事件 #11 只存了 4092 字符），命令会回读 `.system_generated/steps/8/output.txt` 拿到完整的 6937 字节并标注 `[已从 steps/ 补全]`；补不回来时如实提示 `⚠️ steps/N/output.txt 不存在`。
 
@@ -171,11 +176,21 @@ T 3 2026-09-11T13:03:29 (283s)  事件 29–45  文件 1 · 命令 7 · 失败 0
 
 ```text
 4 处命中，分布在 2 个会话
+（已折叠 1 处本次检索自身留下的回声；--include-self 展开）
 
 ### antigravity 5575981e  2026-09-13T00:21:05Z → 2026-09-13T03:31:58Z  (2 命中)
-  #318 user  /xhs-tech-card 结合 docs/xhs_sol_h3_spark_output/index.html，第一次实战经验贴。
-  #441 user  /mobile-xhs-publisher
+  T7 · E318 user  /xhs-tech-card 结合 docs/xhs_sol_h3_spark_output/index.html，第一次实战经验贴。
+  T9 · E441 user  /mobile-xhs-publisher
+    ↳ 1session turn 5575981e 7 --event 318
 ```
+
+每条命中前缀就是**下钻句柄** `T<轮次> · E<事件号>`——顺序照着 `turn <id> <T> --event <E>` 排，
+每个会话再附一条拼好的命令，从第 1 层到第 3 层不用再跑一趟 `turns` 人工比对事件区间。
+
+**默认折叠本次检索自己留下的脚印**：调用方的会话是边跑边索引的，`1session search "X"` 这条
+命令本身（以及它打印出来的东西）会立刻成为 `X` 的第一条命中。判据只有一条——五分钟内写下的
+`1session` 调用及其结果；只有活着的那个 transcript 才可能有「此刻」的时间戳，所以历史会话一条
+都不会被碰到。折叠了多少永远会打印出来，`--include-self` 可以全部展开。
 
 输出示例（上午 Antigravity 定方案 → 下午 Claude Code 落地实现，自动交织成一条时间线）：
 
@@ -206,6 +221,7 @@ import {
   summarizeTurns,
   turnDetail,
   eventDetail,
+  eventDetails,
 } from '@1agents/session-reader';
 
 const sessions = await findSessionsByWorkspace(process.cwd(), { since: '7d' });
@@ -217,7 +233,12 @@ const overview = buildOverview(session);      // 第 1 层：overview.stats / ov
 const turns = summarizeTurns(session);        // 第 2 层
 const detail = turnDetail(session, 3);        // 第 3 层
 const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次工具输出
+const around = await eventDetails(session, '11-13'); // 相邻几条一起读
+hits[0]?.matches[0]?.turn;                    // 命中所在轮次，与 match.index 凑成 T·E 句柄
 ```
+
+`searchSessions` 另接 `selfSessionId` 显式指明调用方（默认取 `SESSION_READER_CALLER_SESSION`）；
+被判定为「调用方自己」的命中不会被删掉，而是带上 `self` / `suppressed` 标记返回，展不展示由调用方定。
 
 `aggregateWorkspaceSessions` 返回 `WorkspaceDigest`：`sessions` / `collaboratingAgents` /
 `unifiedTimeline`（按时间排序的跨智能体节点）/ `fileAttribution`（文件 → 谁在什么时候改的）/ `markdown`。
@@ -266,6 +287,20 @@ const full = await eventDetail(session, 11);  // 第 3 层：未截断的单次�
 ```
 
 同样的原则贯穿每一处：**没有证据就不断言**。异步作业只在有完成回执时标 `completed`，否则一律 `unknown` 并写明依据；没有打印 exit code 的命令结果，`exitCode` 就是空，绝不补成 0。
+
+### 三级溯源回答不了的那一问：现在还成不成立
+
+`observed / derived / candidate` 回答的是**这个事实怎么来的**，不是**它现在还对不对**。
+overview 的「末态」恰恰是最易腐的一段：
+
+> 凡是关于**当前状态**的问题（凭据、环境变量、装了哪个版本、文件还在不在），会话只能告诉你
+> 它**最后一次为真是什么时候**——去核实。转录记下的是说过什么和退出码，不是效果。
+
+三种真实撞上过的情况：一条命令退出码为 0、无报错，但它读到的是空输入，写进配置的是个空值；
+某一轮的结论说「现在存了三份」，其中一份是只活在当时那个 shell 里的临时函数，从没落盘；
+「某某已配好」在当时是对的，三周后需要另外验证。会话忠实记录了意图和退出码，记不下效果——
+这是转录这种载体的边界，不是提取规则的疏漏，所以本模块不打算用更聪明的规则去补它，
+只把话说清楚。
 
 ## 轮次完成状态
 
