@@ -1,6 +1,6 @@
 {
   "name": "@1agents/session-reader",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Read Plane: cross-agent session discovery, turn inspection, workspace aggregation and distillation from raw local session files.",
   "keywords": [
     "claude-code",
