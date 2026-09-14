@@ -553,6 +553,21 @@ base_url  http://scott-mac.tailfb4720.ts.net:7777/v1   ← MagicDNS，跨机可�
 > 而共用同一份定义才谈得上「公共语言」。**schema 是唯一事实源，改类型先去改那个包。**
 > `/manifest` 的 `metadata.protocol_version` 报告本服务遵循的协议版本。
 
+### SQLite 的 TEXT 列会在 NUL 处截断
+
+存进去 `A<NUL>B`，读出来只剩 `A`——**不报错**，安静地丢掉后面全部内容。
+实测一个 antigravity 会话里 `wsl -l -v` 的 UTF-16 输出被当 UTF-8 读，产生交错
+的 NUL，502 字符的 `tool_result` 存完只剩 342，后面 160 个字符凭空消失。
+
+改存 BLOB 能保真，但 `text` / `tool_result` 上有 SQL 搜索（`LIKE` 对 BLOB 不
+工作），所以走**写入转义、读取还原**（`src/store/nul.ts`）。引导符用 U+FFFF：
+Unicode 明确规定的 noncharacter，不会出现在有效文本里；万一真出现也会被双写，
+还原无歧义。绝大多数内容两个字符都不含，直接原样返回，常态零开销。
+
+这类 bug 的可怕之处在于**没有任何报错**——只有 round-trip 测试
+（`readSession(db,row)` 深度等于 `adapter.parse(candidate)`）能抓到它。
+那条断言就是整个索引层的安全网：一旦索引在改写事实而不是缓存事实，它就会红。
+
 ## 测试
 
 ```bash

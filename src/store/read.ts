@@ -1,3 +1,4 @@
+import { decodeText } from './nul.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { turnStartsFrom } from '../turns.js';
 import {
@@ -122,7 +123,7 @@ export function refOf(row: SessionRow): SessionRef {
     id: row.native_id,
     provider: row.provider as AgentProvider,
     path: row.source_path,
-    ...(row.title === null ? {} : { title: row.title }),
+    ...(row.title === null ? {} : { title: decodeText(row.title) }),
     ...(row.workspace === null ? {} : { workspace: row.workspace }),
     ...(row.started_at === null ? {} : { createdAt: row.started_at }),
     ...(row.ended_at === null ? {} : { updatedAt: row.ended_at }),
@@ -158,12 +159,12 @@ function eventsOf(db: DatabaseSync, id: string, nativeId: string): TurnEvent[] {
     id: `${nativeId}#${row.idx}`,
     index: row.idx,
     kind: row.kind as TurnKind,
-    ...(row.text === null ? {} : { text: row.text }),
+    ...(row.text === null ? {} : { text: decodeText(row.text) }),
     ...(row.tool_name === null ? {} : { toolName: row.tool_name }),
     ...(row.tool_args_json === null
       ? {}
       : { toolArgs: JSON.parse(row.tool_args_json) as Record<string, unknown> }),
-    ...(row.tool_result === null ? {} : { toolResult: row.tool_result }),
+    ...(row.tool_result === null ? {} : { toolResult: decodeText(row.tool_result) }),
     ...(row.is_error === null ? {} : { isError: row.is_error === 1 }),
     ...(row.ts === null ? {} : { timestamp: row.ts }),
     ...(row.source_index === null ? {} : { sourceIndex: row.source_index }),

@@ -1440,3 +1440,68 @@ test('端口被占用时给人话，不是一屏 Node 栈', async () => {
     await new Promise<void>((resolve) => first.close(() => resolve()));
   }
 });
+
+/* ---------- SQLite 的 NUL 截断 ---------- */
+
+const NUL_CHAR = String.fromCharCode(0x00);
+const LEAD_CHAR = String.fromCharCode(0xffff);
+
+test('SQLite 的 TEXT 列确实会在 NUL 处截断——这就是要转义的理由', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t (s TEXT)');
+  const original = `A${NUL_CHAR}B${NUL_CHAR}C`;
+  db.prepare('INSERT INTO t VALUES (?)').run(original);
+  // 不报错，安静地只剩第一个 NUL 之前的部分。
+  assert.equal(db.prepare('SELECT s FROM t').get()!.s, 'A');
+});
+
+test('encodeText / decodeText 往返保真', async () => {
+  const { encodeText, decodeText } = await import('../src/store/nul.js');
+  const cases = [
+    '',
+    '普通文本，没有特殊字符',
+    `A${NUL_CHAR}B`,
+    `${NUL_CHAR}${NUL_CHAR}${NUL_CHAR}`,
+    // 实测那条：wsl 的 UTF-16 输出被当 UTF-8 读。
+    ` ${NUL_CHAR} ${NUL_CHAR}N${NUL_CHAR}A${NUL_CHAR}M${NUL_CHAR}E${NUL_CHAR}\r${NUL_CHAR}\n`,
+    // 引导符自己出现在原文里也必须还原得回来。
+    `前${LEAD_CHAR}后`,
+    `${LEAD_CHAR}${LEAD_CHAR}`,
+    `${LEAD_CHAR}0`,
+    `${LEAD_CHAR}${NUL_CHAR}${LEAD_CHAR}0`,
+  ];
+  for (const value of cases) {
+    assert.equal(decodeText(encodeText(value)), value, JSON.stringify(value));
+  }
+  assert.equal(encodeText(null), null);
+  assert.equal(decodeText(undefined), null);
+});
+
+test('编码后的文本存进 SQLite 不会丢内容', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { encodeText, decodeText } = await import('../src/store/nul.js');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t (s TEXT)');
+  const original = `头部${NUL_CHAR}中间${NUL_CHAR}尾部`;
+  db.prepare('INSERT INTO t VALUES (?)').run(encodeText(original));
+  assert.equal(decodeText(db.prepare('SELECT s FROM t').get()!.s as string), original);
+});
+
+test('不含特殊字符时原样返回，不做无谓拷贝', async () => {
+  const { encodeText, decodeText } = await import('../src/store/nul.js');
+  const plain = '绝大多数内容长这样';
+  assert.equal(encodeText(plain), plain);
+  assert.equal(decodeText(plain), plain);
+});
+
+test('转义后的文本仍然能被 SQL LIKE 搜到', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { encodeText } = await import('../src/store/nul.js');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t (s TEXT)');
+  // 选转义而不是 BLOB，就是为了保住 text / tool_result 上的 SQL 搜索。
+  db.prepare('INSERT INTO t VALUES (?)').run(encodeText(`error${NUL_CHAR}code 42`));
+  const hit = db.prepare("SELECT s FROM t WHERE s LIKE '%code 42%'").get();
+  assert.ok(hit, 'NUL 之后的内容也要能搜到');
+});

@@ -1,3 +1,4 @@
+import { encodeText } from './nul.js';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -76,7 +77,7 @@ export function writeSession(
       session.ref.id,
       session.ref.path,
       session.ref.workspace ?? null,
-      session.ref.title ?? null,
+      encodeText(session.ref.title),
       session.ref.createdAt ?? null,
       session.ref.updatedAt ?? null,
       session.turns.length,
@@ -105,10 +106,10 @@ export function writeSession(
         id,
         event.index,
         event.kind,
-        event.text ?? null,
+        encodeText(event.text),
         event.toolName ?? null,
         event.toolArgs ? JSON.stringify(event.toolArgs) : null,
-        event.toolResult ?? null,
+        encodeText(event.toolResult),
         event.isError === undefined ? null : event.isError ? 1 : 0,
         event.timestamp ?? null,
         event.sourceIndex ?? null,
