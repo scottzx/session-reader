@@ -4,7 +4,7 @@
  * 它把本地 Read Plane 原样暴露成网络能力：`1session overview <id>` 成为
  * `sessions.read`。**不重新实现索引与事实层**，只是换一个调用入口。
  *
- * 零运行时依赖：只用 node:http。
+ * HTTP 层不引第三方框架，只用 node:http；端口与协议类型来自 L0 包。
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -15,8 +15,13 @@ import { searchSessions } from '../search.js';
 import { canonicalizePath } from '../util/paths.js';
 import type { AgentProvider, TurnKind } from '../types.js';
 import { buildManifest, nodeIdentity, sessionUri } from './node.js';
+import { DEFAULT_PORTS } from '@1agents/dreammate-network';
+
+/** 约定端口，由 L0 协议包定义——Control Plane 的 pull 探测照着它找服务。 */
+export const DEFAULT_PORT = DEFAULT_PORTS['session-registry'];
 
 export interface ServeOptions {
+  /** 默认 {@link DEFAULT_PORT}。换端口就探测不到了，得自己 register。 */
   port?: number;
   /**
    * Defaults to loopback. Session transcripts contain source code, shell
@@ -197,7 +202,7 @@ export function createServer(options: ServeOptions = {}): http.Server {
 export async function serve(options: ServeOptions = {}): Promise<http.Server> {
   const host = options.host ?? '127.0.0.1';
   const server = createServer(options);
-  await new Promise<void>((resolve) => server.listen(options.port ?? 7777, host, resolve));
+  await new Promise<void>((resolve) => server.listen(options.port ?? DEFAULT_PORT, host, resolve));
   const { port } = server.address() as AddressInfo;
   const identity = await nodeIdentity();
   console.log(`1session serve — node ${identity.name} (${identity.node_id})`);

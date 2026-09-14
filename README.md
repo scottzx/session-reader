@@ -414,6 +414,11 @@ $ 1session graph ca8325e1
 1session serve --host 100.x.x.x --token <t>     # 暴露到 tailnet
 ```
 
+端口 7777 是 [L0 协议](https://github.com/scottzx/dreammate-network) 的**约定端口**
+（`DEFAULT_PORTS['session-registry']`），不是随手挑的：发现是 pull 的——
+Control Plane 从 tailnet 拿到节点后，照着这张表探测 `/manifest` 与 `/health`。
+换成别的端口就探测不到了，得由服务自己 `POST /nodes/register` 告知。
+
 ```
 GET /manifest              Node Manifest（dreammate-network node.schema.json）
 GET /health
@@ -432,6 +437,14 @@ GET /v1/graph/:id          会话之间的引用关系
 ```
 session://<node>/<runtime>/<session_id>
 session://Scott-Mac.local/claude/87f7a60a-a86e-49c5-b711-e463156a5420
+```
+
+**跨机实测**（Windows 节点读 Mac 的会话，全程没有 Control Plane 参与）：
+
+```
+scott-pc$ curl http://scott-mac.tailfb4720.ts.net:7777/v1/sessions?limit=3
+{ "node": "scott-mac",
+  "sessions": [ { "uri": "session://scott-mac/claude/87f7a60a-…", … } ] }
 ```
 
 **读取即落边。** 请求带 `X-Caller-Session: <调用方会话>` 时，读取当下就写入

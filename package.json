@@ -57,6 +57,6 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "@1agents/dreammate-network": "^0.1.0"
+    "@1agents/dreammate-network": "^0.2.0"
   }
 }

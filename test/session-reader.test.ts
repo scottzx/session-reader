@@ -966,3 +966,15 @@ test('tailscale 不可用时静默回退，不抛错', async () => {
     resetTailscaleCache();
   }
 });
+
+test('serve 的默认端口就是 L0 约定的那个', async () => {
+  const { DEFAULT_PORT } = await import('../src/serve/http.js');
+  const { DEFAULT_PORTS } = await import('@1agents/dreammate-network');
+  // 端口是公共词汇：Control Plane 的 pull 探测照着 L0 的表找服务，
+  // 这里自己写一个数字就等于从网络上消失。
+  assert.equal(DEFAULT_PORT, DEFAULT_PORTS['session-registry']);
+  assert.equal(DEFAULT_PORT, 7777);
+  // USAGE 里印给人看的默认值也不能跟它漂开。
+  const usage = await fsp.readFile(new URL('../bin/1session.ts', import.meta.url), 'utf8');
+  assert.match(usage, new RegExp(`--port ${DEFAULT_PORT}`));
+});

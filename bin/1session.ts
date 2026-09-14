@@ -524,9 +524,9 @@ async function main(): Promise<void> {
     }
 
     case 'serve': {
-      const { serve } = await import('../src/serve/http.js');
+      const { serve, DEFAULT_PORT } = await import('../src/serve/http.js');
       await serve({
-        port: num(flags.port) ?? 7777,
+        port: num(flags.port) ?? DEFAULT_PORT,
         ...(str(flags.host) ? { host: str(flags.host)! } : {}),
         ...(str(flags.token) ? { token: str(flags.token)! } : {}),
         ...(str(flags['base-url']) ? { baseUrl: str(flags['base-url'])! } : {}),

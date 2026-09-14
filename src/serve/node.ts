@@ -10,6 +10,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { nodeTypeOf, tailscaleSelf } from './tailscale.js';
 import {
+  DEFAULT_PORTS,
   PROTOCOL_VERSION,
   type AccessDescriptor,
   type NodeManifest,
@@ -113,7 +114,7 @@ export async function buildManifest(baseUrl: string): Promise<NodeManifest> {
   // 有 MagicDNS 就用它：`http://scott-mac:7777` 跨网络稳定，不怕 IP 变，
   // 而请求里的 Host 只是"调用方碰巧用了哪个地址"。
   const advertised = identity.dnsName
-    ? baseUrl.replace(/\/\/[^/]+/, `//${identity.dnsName}:${new URL(baseUrl).port || '7777'}`)
+    ? baseUrl.replace(/\/\/[^/]+/, `//${identity.dnsName}:${new URL(baseUrl).port || String(DEFAULT_PORTS['session-registry'])}`)
     : baseUrl;
   return {
     node_id: identity.node_id,
