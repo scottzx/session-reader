@@ -35,11 +35,21 @@ export const SESSION_CAPABILITIES = [
 
 export async function buildManifest(baseUrl: string): Promise<NodeManifest> {
   const identity = await nodeIdentity();
-  // 有 MagicDNS 就用它：`http://scott-mac:7777` 跨网络稳定，不怕 IP 变，
-  // 而请求里的 Host 只是"调用方碰巧用了哪个地址"。
-  const advertised = identity.dnsName
-    ? baseUrl.replace(/\/\/[^/]+/, `//${identity.dnsName}:${new URL(baseUrl).port || String(DEFAULT_PORTS['session-registry'])}`)
-    : baseUrl;
+  const port = new URL(baseUrl).port || String(DEFAULT_PORTS['session-registry']);
+  const at = (host: string): AccessDescriptor => ({
+    protocol: 'http',
+    base_url: `http://${host}:${port}/v1`,
+  });
+
+  // MagicDNS 名在前（可读，IP 变了也不用改），tailnet IP 兜底：调用方的 DNS
+  // 可能被劫持——实测一台装了 fake-ip 代理的 Mac 会把 MagicDNS 名解析到
+  // 198.18.x.x，只给名字的话那台机器就永远连不上。
+  // 请求里的 Host 只是"调用方碰巧用了哪个地址"，两者都拿不到时才退回它。
+  const access = [
+    ...(identity.dnsName ? [at(identity.dnsName)] : []),
+    ...(identity.ipv4 && identity.ipv4 !== identity.dnsName ? [at(identity.ipv4)] : []),
+  ];
+
   return {
     node_id: identity.node_id,
     name: identity.name,
@@ -54,7 +64,7 @@ export async function buildManifest(baseUrl: string): Promise<NodeManifest> {
         kind: 'session_registry',
         capabilities: [...SESSION_CAPABILITIES],
         resources: [{ scheme: 'session', description: 'session://<node>/<runtime>/<session_id>' }],
-        access: [{ protocol: 'http', base_url: `${advertised}/v1` }],
+        access: access.length > 0 ? access : [{ protocol: 'http', base_url: `${baseUrl}/v1` }],
       },
     ],
   };

@@ -26,7 +26,7 @@ session file (size + mtime + head hash) and reparses only changed bytes, so
 
 ```
 1session list [--limit n] [--scope <path>|cwd|global] [--global]
-              [--provider claude|codex|antigravity] [--since 24h] [--json]
+              [--provider claude|codex|antigravity|grok|dsh] [--since 24h] [--json]
 ```
 
 Most recently updated sessions first. Columns: provider, 8-char id, updated-at,

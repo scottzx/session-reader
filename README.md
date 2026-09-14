@@ -2,7 +2,7 @@
 
 **Read Plane（读平面）** —— 跨智能体会话的发现、逐轮解析、按 `pwd` 聚合与蒸馏。
 
-读平面与执行平面解耦：不依赖任何常驻守护进程、不写库、不改会话，**以本地原始会话文件为唯一准绳**，纯 Node.js 标准库（`fs/promises`、`path`、`os`、`readline`）实现。
+读平面与执行平面解耦：不依赖任何常驻守护进程、不写库、不改会话，**以本地原始会话文件为唯一准绳**，纯 Node.js 标准库（`fs/promises`、`path`、`os`、`readline`、`zlib`）实现。
 
 ## 覆盖的智能体
 
@@ -11,8 +11,23 @@
 | `antigravity` | `~/.gemini/antigravity/brain/<uuid>/.system_generated/logs/transcript.jsonl`（+ 同级 `implementation_plan.md` / `walkthrough.md` 等产出物） | `run_command` 的 `Cwd`；缺失时由所操作文件向上找 `.git` |
 | `claude` | `~/.claude/projects/<slug>/<session-id>.jsonl` | 条目自带的 `cwd` 字段（目录 slug 只用作快速预筛） |
 | `codex` | `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` | `session_meta` / `turn_context` 的 `cwd` |
+| `dsh`（DeepSeek Harness） | `~/.dsh/sessions/<slug>/session-<uuid>/session.v2.jsonl.zstd`（**zstd 分帧压缩**） | 开篇 `session` 记录的 `cwd` |
+| `grok` | `~/.grok/sessions/<percent-encoded cwd>/<uuid>/chat_history.jsonl`（+ 同目录 `events.jsonl` / `rewind_points.jsonl` / `updates.jsonl` / `summary.json` / `goal/*.md`） | `summary.json` 的 `info.cwd`；目录名本身就是 cwd 的百分号编码，可反解 |
 
 所有会话被归一为同一组 `TurnEvent`：`user` / `assistant` / `thinking` / `tool_call` / `tool_result`。
+
+两家新来的各自带一个别人没有的麻烦，都在解析层吃掉了：
+
+- **dsh 的 zstd 是「一次 flush 一帧」追加出来的**，整个文件是若干完整帧首尾相接。Node 的
+  `zstdDecompressSync` 和 `createZstdDecompress` 都只解第一帧就停——不报错，只是安静地
+  少给你 99% 的会话。`src/util/zstd.ts` 按 RFC 8878 的帧头逐帧走位（不解压就能算出每帧
+  边界），整文件读全；正在写入的半截尾帧丢掉而不是毒化整个会话。
+- **grok 的 `chat_history.jsonl` 里一个时间戳都没有**。时间、工具成败、后台回执分散在同目录
+  的侧文件里：`events.jsonl` 的 `tool_started`/`tool_completed`（按 `tool_call_id` 对上，给
+  出耗时与 `outcome`）、`rewind_points.jsonl` 的 `prompt_index → created_at`（用户消息的
+  确切时刻）、`updates.jsonl` 的 ACP 流（助理消息与思考的时刻，**按文本本身对上**而不是按
+  位置猜；对不上就宁可不给时间戳）。token 记账也只有 `updates.jsonl` 有，没有这个文件的
+  会话就如实不报 token。
 
 ## 安装
 
@@ -22,18 +37,18 @@ npm install -g @1agents/session-reader  # 作为 1session 命令
 npx @1agents/session-reader list      # 不安装直接用
 ```
 
-要求 Node.js >= 22.5（依赖内置的 `node:sqlite`）。
+要求 Node.js >= 22.15（`node:sqlite` 建索引，`node:zlib` 的 zstd 读 dsh 的压缩会话；zstd 是 22.15 才进 `node:zlib` 的）。
 唯一的运行时依赖是自家的 [`@1agents/dreammate-network`](https://github.com/scottzx/dreammate-network)
 ——L0 协议定义，12 kB，本身零依赖——`npm install` 会自动带上，不需要单独装。
 
-## 内置 skill：一条命令装到三家智能体
+## 内置 skill：一条命令装到五家智能体
 
-`1session` 自带一个 skill（`skills/1session/`），装进三家智能体各自的 skills 目录后，
+`1session` 自带一个 skill（`skills/1session/`），装进各家智能体自己的 skills 目录后，
 它们在用户问起"上次/之前/那个报错"时会自己想起来调这个 CLI，而不需要你每次手动贴命令。
 
 ```bash
-1session skill install        # 链接到三家（未安装的智能体会跳过）
-1session skill status         # 看三家各自是什么状态
+1session skill install        # 链接到五家（未安装的智能体会跳过）
+1session skill status         # 看五家各自是什么状态
 1session skill uninstall      # 撤掉
 ```
 
@@ -42,11 +57,13 @@ npx @1agents/session-reader list      # 不安装直接用
 | claude | `~/.claude/skills/1session` |
 | codex | `~/.codex/skills/1session` |
 | antigravity | `~/.gemini/antigravity/skills/1session`（**不是** `~/.gemini/skills`，那是 gemini-cli 的位） |
+| grok | `~/.grok/skills/1session` |
+| dsh | `~/.dsh/skills/1session` |
 
-三家的格式完全一致（`<dir>/<name>/SKILL.md` + YAML frontmatter），所以装的是同一份文件。
+五家的格式完全一致（`<dir>/<name>/SKILL.md` + YAML frontmatter），所以装的是同一份文件。
 
 默认建**符号链接**而不是拷贝：下次 `npm i -g @1agents/session-reader@latest` 升级后，
-三家看到的 skill 自动就是新的，不用记着重装。Claude Code 实测会跟随符号链接并热加载。
+各家看到的 skill 自动就是新的，不用记着重装。Claude Code 实测会跟随符号链接并热加载。
 如果某家的加载器不认符号链接（表现是 `status` 显示已链接、但智能体里看不到这个 skill），
 用 `1session skill install --copy` 换成拷贝——代价是升级后要重跑一次安装，`status`
 会把"拷贝与当前包不一致"显式标出来。
@@ -79,7 +96,7 @@ npm run build && node dist/bin/1session.js <command>
 | `1session search <query> [--scope <path>\|cwd\|global] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--include-self] [--json]` | 跨会话全文检索：命中带 `T<轮次> · E<事件号>` 句柄 + 上下文片段（默认当前 pwd 子树，见 `--scope`） |
 | `1session index [<id>] [--all] [--scope <path>\|cwd\|global] [--force] [--since 30d]` | 建立 / 刷新索引；`--all` 全库回填 |
 | `1session graph <id> [--json]`（别名 `related`） | 会话之间的引用关系 + 每条边的证据 |
-| `1session skill install\|status\|uninstall [--agent a,b] [--copy] [--force] [--dry-run]` | 把内置 skill 装进三家智能体的 skills 目录（见上） |
+| `1session skill install\|status\|uninstall [--agent a,b] [--copy] [--force] [--dry-run]` | 把内置 skill 装进五家智能体的 skills 目录（见上） |
 
 全局开关 `--no-index` 绕过索引直读源文件。
 
@@ -106,13 +123,15 @@ npm run build && node dist/bin/1session.js <command>
 
 （`--workspace <path>` 是路径形式的旧拼法，仍然可用，优先于 `--scope`。）
 
-**路径从哪来**（三家各写各的，读之前先归一）：
+**路径从哪来**（各家各写各的，读之前先归一）：
 
 | Provider | 项目路径 | 时间 |
 | --- | --- | --- |
 | claude | 目录名 = cwd 的 slug（`~/.claude/projects/-Users-me-proj/`），每行 JSONL 另带 `cwd` | `updatedAt` = 文件 mtime；`createdAt` = 首行 `timestamp` |
 | codex | 目录只按日期分（`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`），路径只在 `session_meta` / `turn_context` 的 `payload.cwd` 里 | `updatedAt` = mtime；`createdAt` = `session_meta.timestamp`，兜底解析文件名里的时间戳 |
 | antigravity | transcript 里没有 cwd，但 IDE 自己维护着项目↔会话的关系：`~/.gemini/antigravity/conversations/<id>.db` 的 `trajectory_metadata_blob` 里存着打开的目录（protobuf 字段 1.1，`file://` URI；1.2 是外层 workspace 根，1.4 是 git 分支）。读它，读不到才退回从工具参数里猜 | `updatedAt` = mtime；`createdAt` = 首个 step 的 `created_at` |
+| dsh | 目录名是 cwd 的有损编码（`-` 同时代表 `/` 和字面 `-`），只当参考；真 cwd 在开篇 `session` 记录的 `cwd` 里。`scanRef` 只解压文件头 64KB——zstd 帧自带边界，取前缀就等于取会话前缀 | `updatedAt` = mtime；`createdAt` = `session.createdAt`（epoch 毫秒） |
+| grok | 目录名是 cwd 的**百分号编码**，`decodeURIComponent` 就能无损还原，所以带 `--scope` 时可以在开文件之前就筛掉不相干的会话；`summary.json` 的 `info.cwd` 是正式答案 | `updatedAt` / `createdAt` 直接取 `summary.json`；候选发现时的 mtime 取 `chat_history.jsonl` 与 `summary.json` 里较新的那个 |
 
 排序和 `--since` 都只用 mtime，`listCandidates()` 一次 `stat` 就够，不必打开文件 —— 打开文件（拿标题、cwd、创建时间）才是贵的那一步，所以它走索引缓存。
 
@@ -126,7 +145,7 @@ Antigravity 的 626 个会话里，本机有 14 个至今没有路径 —— 不
 - 第一次全量解析本机 625 个会话约 **10s**，之后每次 `list` 约 **0.5s**；
 - `--no-index` 仍然可以绕开索引直读源文件，两条路的结果应当逐条一致（可以 `diff` 验证）。
 
-升级到这一版后，索引会因为 `PARSER_VERSION` 提升而自动重建一次（antigravity 的 workspace 口径变了），无需手动清库；想主动做可以跑 `1session index --all --global`。
+升级到这一版后，索引会因为 `PARSER_VERSION` / `EXTRACTOR_VERSION` 提升而自动重建一次（新增 grok / dsh 两家，写文件工具表也跟着补了 `search_replace` 与 `run_terminal_command`），无需手动清库；想主动做可以跑 `1session index --all --global`。
 
 `<session-id>` 支持完整 id、id 前缀（≥6 位）或原始文件路径。
 
@@ -330,7 +349,7 @@ overview 的「末态」恰恰是最易腐的一段：
 - **`--since` 的精度**：预筛用文件 mtime（可能因同步/复制而失真），`--digest` 会在整篇解析后用真实轮次时间戳再过滤一次。
 - **Claude 标题**：`list` 只读文件头，标题取首个用户请求；`inspect`/`digest`/`workspace --digest` 会整篇解析，此时优先使用会话自身的 `custom-title` / `ai-title`。
 - **`search` 没有扫描上限**。早先它受发现层的扫描预算限制，一次查询其实只看最近 ~60 个会话／每个智能体，却把结果报告得像查全了——"静默不全"比慢危险。现在 `--limit` 只管返回几个会话，不再兼任"最多检查几个会话"；满足 `--workspace` / `--since` / `--provider` 的会话一个不漏。默认每个会话最多列 5 处命中，`totalMatches` 给的是真实总数。
-- **文件归属分三级溯源**（见上文 provenance）。`observed` 来自显式写工具（`Write`/`Edit`/`write_to_file`/`replace_file_content`/`apply_patch`）与 provider 自己记的 `FileChange`；`derived` 是从 shell 命令里解析出来的（`>`/`>>`、`tee`、`cp`/`mv`、`scp`、`sed -i`、python 的 `write_text`/`open(w)`）。没有后者，纯靠 shell 干活的智能体（如 codex 全程走 `exec` 沙箱）会显示成"一个文件都没改过"。这是启发式，可能漏也可能多报，所以每行都写明是哪条规则提取的。
+- **文件归属分三级溯源**（见上文 provenance）。`observed` 来自显式写工具（`Write`/`Edit`/`write_to_file`/`replace_file_content`/`apply_patch`/grok 的 `search_replace`）与 provider 自己记的 `FileChange`；`derived` 是从 shell 命令里解析出来的（`>`/`>>`、`tee`、`cp`/`mv`、`scp`、`sed -i`、python 的 `write_text`/`open(w)`）。没有后者，纯靠 shell 干活的智能体（如 codex 全程走 `exec` 沙箱）会显示成"一个文件都没改过"。这是启发式，可能漏也可能多报，所以每行都写明是哪条规则提取的。
 - **轮次边界按"其后最近开始的那一轮"归属**。`task_started` 总比该轮第一个事件早几秒（12:41:06 vs 12:41:13），按"落在窗口内"匹配会全部落空。
 - **统计优先用各家自己记的结构化数据，而不是我们推断**。codex 的 `event_msg/item_completed` 里有 `FileChange`（带 diff）、`CommandExecution`（带 pid/cwd）、`task_started/task_complete`（轮次边界 + 耗时）与 `token_usage_record`；claude 每条都带 `gitBranch`/`model`/`usage`；antigravity 的产物、上传、后台任务分别在 brain 目录、`.user_uploaded/` 与 `.system_generated/{tasks,messages}/`。统计里 `filesByProvenance` 给出这次的 `observed / derived` 分项计数。
 - **轮次边界按时间对齐，不按下标**。codex 原生边界（12 个）比用户消息（15 条）少，按下标取耗时会错位。

@@ -1,11 +1,11 @@
 ---
 name: 1session
-description: Search and read the user's past AI coding sessions across Claude Code, Codex and Antigravity from their raw local session files, using the `1session` CLI. Use this whenever the user refers to work they did in an earlier session rather than in this conversation — "上次/之前/昨天我们改了什么", "那个报错后来怎么解决的", "我在哪个会话里提过 X", "这个功能是哪一轮加的", "codex 那边做到哪了", "跨项目找一下", "整理一下最近几天的会话/写个周报". Also reach for it proactively, before asking the user to re-explain context they have obviously already established with some agent on this machine — the answer is usually already on disk. Read-only: it never modifies or resumes a session.
+description: Search and read the user's past AI coding sessions across Claude Code, Codex, Antigravity, Grok and DeepSeek Harness (dsh) from their raw local session files, using the `1session` CLI. Use this whenever the user refers to work they did in an earlier session rather than in this conversation — "上次/之前/昨天我们改了什么", "那个报错后来怎么解决的", "我在哪个会话里提过 X", "这个功能是哪一轮加的", "codex 那边做到哪了", "grok/dsh 那边呢", "跨项目找一下", "整理一下最近几天的会话/写个周报". Also reach for it proactively, before asking the user to re-explain context they have obviously already established with some agent on this machine — the answer is usually already on disk. Read-only: it never modifies or resumes a session.
 ---
 
 # 1session — the cross-agent Read Plane
 
-Three agents write sessions to this machine in three different formats. `1session`
+Five agents write sessions to this machine in five different formats. `1session`
 normalizes all of them and answers questions about what actually happened.
 
 | Provider | On disk | Covered |
@@ -13,6 +13,8 @@ normalizes all of them and answers questions about what actually happened.
 | `claude` | `~/.claude/projects/<slug>/<id>.jsonl` | prompts, tools, commands, files, tokens, git branch |
 | `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | same, plus structured `exit_code` / `stderr` / `pid` |
 | `antigravity` | `~/.gemini/antigravity/brain/<uuid>/.../transcript.jsonl` | same, plus plan/walkthrough artifacts |
+| `grok` | `~/.grok/sessions/<encoded cwd>/<uuid>/chat_history.jsonl` | same, plus tool durations/outcomes, background-task receipts, goal plans |
+| `dsh` | `~/.dsh/sessions/<slug>/session-<uuid>/session.v2.jsonl.zstd` | same, plus native turn/step boundaries and per-message usage |
 
 Everything is derived from the raw files at read time. Nothing is written back to
 them, no daemon is involved, and no session is ever resumed or modified.

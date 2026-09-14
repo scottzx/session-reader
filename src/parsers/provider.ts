@@ -17,6 +17,13 @@ export interface ProviderAdapter {
   /** Full parse into ordered turns. */
   parse(candidate: SessionCandidate): Promise<NormalizedSession>;
   /**
+   * The workspace the file's own location proves, for providers that encode
+   * the cwd losslessly in the path (Grok percent-encodes it). Lets a scoped
+   * listing reject a candidate before opening it — never a substitute for the
+   * workspace `scanRef` reads out of the session itself.
+   */
+  workspaceOf?(candidate: SessionCandidate): string | undefined;
+  /**
    * Extra identity for providers whose `parse` reads more than the transcript
    * (antigravity also picks up artifacts next to it). Folded into the index
    * fingerprint so those side files cannot go stale unnoticed.

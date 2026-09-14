@@ -1,6 +1,13 @@
 /** Canonical domain types shared by every provider parser. */
 
-export type AgentProvider = 'antigravity' | 'claude' | 'codex' | 'cursor' | 'unknown';
+export type AgentProvider =
+  | 'antigravity'
+  | 'claude'
+  | 'codex'
+  | 'dsh'
+  | 'grok'
+  | 'cursor'
+  | 'unknown';
 
 /** Cheap metadata about a discovered session, obtained without a full parse. */
 export interface SessionRef {

@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import zlib from 'node:zlib';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { antigravityAdapter, workspaceFromTrajectoryBlob } from '../src/parsers/antigravity.js';
 import { claudeAdapter } from '../src/parsers/claude.js';
 import { codexAdapter } from '../src/parsers/codex.js';
-import type { ProviderAdapter } from '../src/parsers/provider.js';
-import type { TurnEvent } from '../src/types.js';
+import { dshAdapter } from '../src/parsers/dsh.js';
+import { grokAdapter, workspaceFromProjectDir } from '../src/parsers/grok.js';
+import type { ProviderAdapter, SessionCandidate } from '../src/parsers/provider.js';
+import type { NormalizedSession, TurnEvent } from '../src/types.js';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { listRecentSessions, parseSince, resolveSession } from '../src/resolver.js';
@@ -26,6 +29,7 @@ import {
 import { commandLedger, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { fileWrites, resolveWritePath, stripHeredocs } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
+import { decodeZstd, frameRanges } from '../src/util/zstd.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
 import { installSkill, skillStatus, uninstallSkill } from '../src/skill.js';
 import { buildManifest, sessionUri } from '../src/serve/node.js';
@@ -87,20 +91,304 @@ test('claude: scanRef prefers the session title over the first prompt', async ()
   assert.equal((await claudeAdapter.scanRef(plain)).title, 'hi');
 });
 
+/**
+ * Agents that compress their transcripts append one frame per flush, so the
+ * file is a run of complete frames. Node's own zstd calls stop after the first.
+ */
+test('zstd: a transcript of appended frames decodes whole, a torn tail is dropped', () => {
+  const parts = [
+    '{"type":"session","cwd":"/tmp/ws"}\n',
+    '{"type":"user/message","seq":1}\n{"type":"tool/call","seq":2}\n',
+    '{"type":"turn/end","seq":3}\n',
+  ].map((text) => zlib.zstdCompressSync(Buffer.from(text)));
+
+  const whole = Buffer.concat(parts);
+  assert.equal(frameRanges(whole).length, 3);
+  assert.equal(decodeZstd(whole).split('\n').filter(Boolean).length, 4);
+  // Node stops at the first frame, which is the bug this walker exists for.
+  assert.equal(zlib.zstdDecompressSync(whole).toString().split('\n').filter(Boolean).length, 1);
+
+  // A session still being written ends mid-frame; everything before it stands.
+  const torn = Buffer.concat([...parts.slice(0, 2), parts[2]!.subarray(0, 5)]);
+  assert.equal(decodeZstd(torn).split('\n').filter(Boolean).length, 3);
+});
+
+test('grok: the project directory decodes back to the exact cwd', () => {
+  assert.equal(
+    workspaceFromProjectDir('%2Ftmp%2F01-%E5%BC%80%E5%8F%91%2Fapp'),
+    canonicalizePath('/tmp/01-开发/app'),
+  );
+});
+
+/** DSH records turn/step boundaries natively and flags its own failures. */
+test('dsh: reads a compressed session, its title, usage and exit codes', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), '1session-dsh-'));
+  const dir = path.join(home, 'session-11111111-2222-3333-4444-555555555555');
+  await fs.mkdir(dir, { recursive: true });
+  const lines = [
+    { type: 'session', version: 2, id: 'session-1', createdAt: 1_700_000_000_000, cwd: '/tmp/ws' },
+    { type: 'turn/start', seq: 1, time: 1_700_000_001_000, data: { turn: 1 } },
+    {
+      type: 'user/message',
+      seq: 2,
+      time: 1_700_000_001_000,
+      data: { content: [{ type: 'text', text: '装一下 mdns' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'user/message',
+      seq: 3,
+      time: 1_700_000_001_500,
+      data: { content: [{ type: 'text', text: 'skill catalogue' }], source: { kind: 'skill-catalog' } },
+    },
+    {
+      type: 'assistant/message',
+      seq: 4,
+      time: 1_700_000_002_000,
+      data: {
+        turn: 1,
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'reasoning', text: 'think' },
+            { type: 'text', text: '先试连接' },
+            { type: 'tool-call', text: '' },
+          ],
+          source: { kind: 'model', provider: 'spark', model: 'test-model' },
+        },
+        usage: { inputTokens: 10, outputTokens: 4, totalTokens: 34, cacheReadTokens: 20 },
+      },
+    },
+    {
+      type: 'tool/call',
+      seq: 5,
+      time: 1_700_000_003_000,
+      data: { turn: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ssh host true"}' },
+    },
+    {
+      type: 'tool/result',
+      seq: 6,
+      time: 1_700_000_004_000,
+      data: {
+        message: {
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'c1',
+              isError: true,
+              content: [{ type: 'text', text: 'Host key verification failed. [exit code: 255]' }],
+            },
+          ],
+        },
+      },
+    },
+    { type: 'session/title', seq: 7, time: 1_700_000_005_000, data: { title: '装 mdns' } },
+    { type: 'turn/end', seq: 8, time: 1_700_000_006_000, data: { turn: 1, reason: { kind: 'completed' } } },
+  ];
+  // Two frames, so the fixture exercises the appending the real files do.
+  await fs.writeFile(
+    path.join(dir, 'session.v2.jsonl.zstd'),
+    Buffer.concat(
+      [lines.slice(0, 4), lines.slice(4)].map((chunk) =>
+        zlib.zstdCompressSync(Buffer.from(`${chunk.map((line) => JSON.stringify(line)).join('\n')}\n`)),
+      ),
+    ),
+  );
+  const stat = await fs.stat(path.join(dir, 'session.v2.jsonl.zstd'));
+  const candidate = {
+    id: '11111111-2222-3333-4444-555555555555',
+    path: path.join(dir, 'session.v2.jsonl.zstd'),
+    mtimeMs: stat.mtimeMs,
+    sizeBytes: stat.size,
+  };
+
+  const ref = await dshAdapter.scanRef(candidate);
+  assert.equal(ref.title, '装 mdns');
+  assert.equal(ref.workspace, canonicalizePath('/tmp/ws'));
+
+  const session = await dshAdapter.parse(candidate);
+  assert.deepEqual(
+    session.turns.map((turn) => turn.kind),
+    ['user', 'thinking', 'assistant', 'tool_call', 'tool_result'],
+  );
+  // Injected catalogues are not the user speaking.
+  assert.equal(session.stats.extras['injected:skill-catalog'], 1);
+  // A `tool-call` block restates the `tool/call` record; counting both doubles it.
+  assert.equal(session.turns.filter((turn) => turn.kind === 'tool_call').length, 1);
+  assert.equal(session.turns.at(-1)!.exitCode, 255);
+  assert.equal(session.turns.at(-1)!.isError, true);
+  assert.deepEqual(session.stats.models, ['test-model']);
+  // Cache reads are reported beside input, never inside it.
+  assert.deepEqual(session.stats.tokens, { input: 10, output: 4, total: 14, cacheRead: 20 });
+  assert.deepEqual(session.stats.turnBoundaries, [
+    {
+      id: '1',
+      startedAt: new Date(1_700_000_001_000).toISOString(),
+      endedAt: new Date(1_700_000_006_000).toISOString(),
+      durationMs: 5000,
+      completed: true,
+    },
+  ]);
+
+  // A session can be opened and never titled. The index stores an absent
+  // column as absent, so the ref must omit the key rather than set it to
+  // `undefined` — otherwise a cached ref stops equalling a parsed one.
+  const bare = path.join(home, 'session-99999999-2222-3333-4444-555555555555');
+  await fs.mkdir(bare, { recursive: true });
+  const barePath = path.join(bare, 'session.v2.jsonl.zstd');
+  await fs.writeFile(
+    barePath,
+    zlib.zstdCompressSync(
+      Buffer.from(`${JSON.stringify({ type: 'session', version: 2, id: 'session-2' })}\n`),
+    ),
+  );
+  const bareCandidate = { id: 'x', path: barePath, mtimeMs: Date.now(), sizeBytes: 1 };
+  for (const empty of [await dshAdapter.scanRef(bareCandidate), (await dshAdapter.parse(bareCandidate)).ref]) {
+    assert.ok(!('title' in empty), 'an untitled session must not carry a title key');
+    assert.ok(!('workspace' in empty), 'a session with no cwd must not carry a workspace key');
+  }
+  await fs.rm(home, { recursive: true, force: true });
+});
+
+/**
+ * Grok's transcript carries no clock at all: the times, the outcomes and the
+ * background receipts all live in the files beside it.
+ */
+test('grok: joins the transcript to the side files that hold the clock', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), '1session-grok-'));
+  const dir = path.join(home, '%2Ftmp%2Fws', '019ff70d-f3a1-7a92-bd32-f7fe40f198fe');
+  await fs.mkdir(dir, { recursive: true });
+  const jsonl = (rows: unknown[]) => `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`;
+
+  await fs.writeFile(
+    path.join(dir, 'summary.json'),
+    JSON.stringify({
+      info: { id: 'x', cwd: '/tmp/ws' },
+      session_summary: '',
+      generated_title: '整理索引',
+      created_at: '2026-08-12T17:38:34.551571Z',
+      updated_at: '2026-08-12T17:49:25.712891Z',
+      current_model_id: 'grok-4.6',
+      head_branch: 'main',
+    }),
+  );
+  await fs.writeFile(
+    path.join(dir, 'chat_history.jsonl'),
+    jsonl([
+      { type: 'system', content: 'you are grok' },
+      { type: 'user', content: [{ type: 'text', text: '<user_info>\nOS: macos\n</user_info>\n<rules>none</rules>' }] },
+      { type: 'user', prompt_index: 0, content: [{ type: 'text', text: '<user_query>\n整理 202503\n</user_query>' }] },
+      { type: 'user', synthetic_reason: 'system_reminder', content: [{ type: 'text', text: '<system-reminder>skills</system-reminder>' }] },
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: '先读规则' }] },
+      {
+        type: 'assistant',
+        content: '先读规则再动手',
+        model_id: 'grok-4.6-build',
+        tool_calls: [{ id: 'call-1', name: 'write', arguments: '{"file_path":"/tmp/ws/index.md"}' }],
+      },
+      { type: 'tool_result', tool_call_id: 'call-1', content: 'wrote' },
+      {
+        type: 'user',
+        synthetic_reason: 'task_completed',
+        prompt_index: 1,
+        content: [
+          {
+            type: 'text',
+            text: '<system-reminder>\nBackground task "call-9" completed (exit code: 1).\nCommand: sleep 1\n</system-reminder>',
+          },
+        ],
+      },
+    ]),
+  );
+  await fs.writeFile(
+    path.join(dir, 'events.jsonl'),
+    jsonl([
+      { ts: '2026-08-12T17:38:37.645Z', type: 'turn_started', turn_number: 0 },
+      { ts: '2026-08-12T17:38:53.428Z', type: 'tool_started', tool_name: 'write' },
+      {
+        ts: '2026-08-12T17:38:53.431Z',
+        type: 'tool_completed',
+        tool_name: 'write',
+        duration_ms: 3,
+        outcome: 'error',
+        tool_call_id: 'call-1',
+      },
+      { ts: '2026-08-12T17:49:25.683Z', type: 'turn_ended', outcome: 'error' },
+    ]),
+  );
+  await fs.writeFile(
+    path.join(dir, 'rewind_points.jsonl'),
+    jsonl([{ prompt_index: 0, created_at: '2026-08-12T17:38:37.645Z' }]),
+  );
+
+  const stat = await fs.stat(path.join(dir, 'chat_history.jsonl'));
+  const candidate = {
+    id: '019ff70d-f3a1-7a92-bd32-f7fe40f198fe',
+    path: path.join(dir, 'chat_history.jsonl'),
+    mtimeMs: stat.mtimeMs,
+    sizeBytes: stat.size,
+  };
+
+  assert.equal(grokAdapter.workspaceOf!(candidate), canonicalizePath('/tmp/ws'));
+  const ref = await grokAdapter.scanRef(candidate);
+  assert.equal(ref.title, '整理索引');
+  assert.equal(ref.updatedAt, '2026-08-12T17:49:25.712891Z');
+
+  const session = await grokAdapter.parse(candidate);
+  assert.deepEqual(
+    session.turns.map((turn) => turn.kind),
+    ['user', 'thinking', 'assistant', 'tool_call', 'tool_result', 'tool_result'],
+  );
+  // The ambient `<user_info>` block is boilerplate; the prompt is the query.
+  assert.equal(session.turns[0]!.text, '整理 202503');
+  assert.equal(session.turns[0]!.timestamp, '2026-08-12T17:38:37.645Z');
+  assert.equal(session.stats.extras['injected:system_reminder'], 1);
+  // Outcome lives in the event log, never on the result itself.
+  const result = session.turns[4]!;
+  assert.equal(result.isError, true);
+  assert.equal(result.timestamp, '2026-08-12T17:38:53.431Z');
+  assert.equal(result.durationMs, 3);
+  assert.equal(session.turns[3]!.timestamp, '2026-08-12T17:38:53.428Z');
+  // A turn that ended badly still ended; how it ended is its own fact.
+  assert.deepEqual(session.stats.turnBoundaries.map((boundary) => boundary.completed), [true]);
+  assert.equal(session.stats.extras['turn:error'], 1);
+  // The receipt is the only completion proof a background task ever gets.
+  assert.deepEqual(session.stats.backgroundTasks, [
+    { id: 'call-9', title: 'sleep 1', finished: true },
+  ]);
+  assert.deepEqual(session.stats.branches, ['main']);
+  assert.deepEqual(session.stats.models, ['grok-4.6', 'grok-4.6-build']);
+  await fs.rm(home, { recursive: true, force: true });
+});
+
 /** Every adapter must produce well-formed turns from the newest real session. */
-for (const adapter of [antigravityAdapter, claudeAdapter, codexAdapter] as ProviderAdapter[]) {
+for (const adapter of [
+  antigravityAdapter,
+  claudeAdapter,
+  codexAdapter,
+  dshAdapter,
+  grokAdapter,
+] as ProviderAdapter[]) {
   test(`${adapter.provider}: parses the newest local session`, async (t) => {
     const candidates = await adapter.listCandidates();
     if (!candidates.length) return t.skip(`no local ${adapter.provider} sessions`);
 
-    const newest = candidates[0]!;
+    // A session can be opened and abandoned before anyone says anything, so
+    // "the newest one" is the newest that actually holds a conversation.
+    let session: NormalizedSession | undefined;
+    let newest: SessionCandidate | undefined;
+    for (const candidate of candidates.slice(0, 10)) {
+      const parsed = await adapter.parse(candidate);
+      if (!parsed.turns.length) continue;
+      session = parsed;
+      newest = candidate;
+      break;
+    }
+    if (!session || !newest) return t.skip(`no ${adapter.provider} session with any turns`);
+
     const ref = await adapter.scanRef(newest);
     assert.equal(ref.provider, adapter.provider);
     assert.equal(ref.id, newest.id);
     assert.ok(path.isAbsolute(ref.path));
-
-    const session = await adapter.parse(newest);
-    assert.ok(session.turns.length > 0, 'expected at least one turn');
     const ids = new Set<string>();
     session.turns.forEach((turn, index) => {
       assert.equal(turn.index, index, 'turns must stay in file order');
@@ -493,7 +781,11 @@ test('eventDetail recovers antigravity output that the transcript truncated', as
   t.skip('no truncated antigravity events available');
 });
 
-async function newestOf(provider: 'codex' | 'antigravity' | 'claude') {
+type LocalProvider = 'codex' | 'antigravity' | 'claude' | 'dsh' | 'grok';
+
+const ALL_PROVIDERS: readonly LocalProvider[] = ['codex', 'antigravity', 'claude', 'dsh', 'grok'];
+
+async function newestOf(provider: LocalProvider) {
   const [ref] = await listRecentSessions({ limit: 1, provider });
   if (!ref) return undefined;
   const resolved = await resolveSession(ref.id);
@@ -635,7 +927,7 @@ test('token usage separates cache replays from real input', async (t) => {
 });
 
 test('the file ledger has one row count, whichever way you ask', async (t) => {
-  for (const provider of ['codex', 'antigravity', 'claude'] as const) {
+  for (const provider of ALL_PROVIDERS) {
     const session = await newestOf(provider);
     if (!session) continue;
     const files = fileLedger(session);
@@ -656,7 +948,7 @@ test('the file ledger has one row count, whichever way you ask', async (t) => {
 });
 
 test('stats.errors matches the error ledger exactly', async (t) => {
-  for (const provider of ['codex', 'antigravity', 'claude'] as const) {
+  for (const provider of ALL_PROVIDERS) {
     const session = await newestOf(provider);
     if (!session) continue;
     const overview = buildOverview(session);
@@ -695,7 +987,6 @@ import { openStore, resetStoreCache } from '../src/store/db.js';
 import { indexSession } from '../src/store/indexer.js';
 import { invocationsOf, deriveEdges, edgesOf } from '../src/store/edges.js';
 import { readSession, sessionRow } from '../src/store/read.js';
-import type { NormalizedSession } from '../src/types.js';
 
 async function tempStore() {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'session-index-'));
@@ -708,12 +999,21 @@ test('a session read back from the index equals a fresh parse', async (t) => {
   const { db, dir } = await tempStore();
   try {
     let checked = 0;
-    for (const provider of ['codex', 'antigravity', 'claude'] as const) {
-      const [ref] = await listRecentSessions({ limit: 1, provider });
-      if (!ref) continue;
-      const handle = await resolveSession(ref.id);
-      if (!handle) continue;
-      const direct = await handle.adapter.parse(handle.candidate);
+    for (const provider of ALL_PROVIDERS) {
+      // An abandoned session round-trips trivially; take one with content.
+      const refs = await listRecentSessions({ limit: 10, provider });
+      let handle: Awaited<ReturnType<typeof resolveSession>>;
+      let direct: NormalizedSession | undefined;
+      for (const ref of refs) {
+        const resolved = await resolveSession(ref.id);
+        if (!resolved) continue;
+        const parsed = await resolved.adapter.parse(resolved.candidate);
+        if (!parsed.turns.length) continue;
+        handle = resolved;
+        direct = parsed;
+        break;
+      }
+      if (!handle || !direct) continue;
       const { id } = await indexSession(db, handle);
       const row = sessionRow(db, id)!;
       // This is the safety net for the whole store: if these ever diverge,
@@ -915,14 +1215,20 @@ test('indexed search and --no-index agree hit for hit', async (t) => {
 
 test('skill install links into every agent, is idempotent and reversible', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), '1session-skill-'));
-  for (const dir of ['.claude', '.codex', path.join('.gemini', 'antigravity')]) {
+  for (const dir of ['.claude', '.codex', path.join('.gemini', 'antigravity'), '.grok', '.dsh']) {
     await fs.mkdir(path.join(home, dir), { recursive: true });
   }
 
   const first = await installSkill({ home });
   assert.deepEqual(
     first.map((row) => [row.agent, row.action]),
-    [['claude', 'linked'], ['codex', 'linked'], ['antigravity', 'linked']],
+    [
+      ['claude', 'linked'],
+      ['codex', 'linked'],
+      ['antigravity', 'linked'],
+      ['grok', 'linked'],
+      ['dsh', 'linked'],
+    ],
   );
   // Every agent reads the same file through its own path.
   for (const row of skillStatus(home)) {
@@ -949,6 +1255,8 @@ test('skill install skips agents that are not installed, and can copy instead of
   assert.equal(byAgent.codex, 'copied');
   assert.equal(byAgent.claude, 'skipped');
   assert.equal(byAgent.antigravity, 'skipped');
+  assert.equal(byAgent.grok, 'skipped');
+  assert.equal(byAgent.dsh, 'skipped');
 
   const status = skillStatus(home).find((row) => row.agent === 'codex')!;
   assert.deepEqual(status.state, { kind: 'copied', current: true });
@@ -997,11 +1305,20 @@ test('buildManifest satisfies the dreammate-network node contract', async () => 
     assert.ok(service.capabilities.includes(capability), `missing ${capability}`);
   }
   // Transport lives in `access`, never in the capability name itself. The host
-  // is whatever the node advertises (its MagicDNS name when tailscale is up),
-  // so only the shape is fixed here.
-  assert.equal(service.access?.length, 1);
-  assert.equal(service.access?.[0]!.protocol, 'http');
-  assert.match(service.access?.[0]!.base_url ?? '', /^http:\/\/.+\/v1$/);
+  // is whatever the node advertises, so only the shape is fixed here.
+  assert.ok((service.access?.length ?? 0) >= 1);
+  for (const entry of service.access ?? []) {
+    assert.equal(entry.protocol, 'http');
+    assert.match(entry.base_url ?? '', /^http:\/\/.+\/v1$/);
+  }
+  // 有 tailnet 身份时给两条：MagicDNS 名在前，IP 兜底——调用方 DNS 被劫持时
+  // 还有路可走。数组有序，靠前的优先。
+  const identity = await sharedIdentity();
+  if (identity.source === 'tailscale' && identity.ipv4) {
+    assert.equal(service.access?.length, 2);
+    assert.ok(service.access?.[0]!.base_url?.includes(identity.dnsName ?? ''));
+    assert.ok(service.access?.[1]!.base_url?.includes(identity.ipv4));
+  }
   assert.ok(!service.capabilities.some((name: string) => /http|mcp|cli/i.test(name)));
 });
 

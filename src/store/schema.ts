@@ -10,9 +10,9 @@
 /** DDL layout. A bump drops and rebuilds the whole database. */
 export const SCHEMA_VERSION = 1;
 /** L1 semantics — anything in `parsers/` that changes normalized events. */
-export const PARSER_VERSION = 2;
+export const PARSER_VERSION = 3;
 /** L2 rules — `writes.ts` / `ledger.ts`. Re-derives facts from stored events. */
-export const EXTRACTOR_VERSION = 1;
+export const EXTRACTOR_VERSION = 2;
 /** L3 rules — `store/edges.ts`. Re-derives edges from stored events. */
 export const EDGE_VERSION = 1;
 

@@ -10,6 +10,7 @@ import { listRecentSessions, loadSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
+import type { SkillAgent } from '../src/skill.js';
 import type { DigestFocus, FileGroup, NormalizedSession, TurnKind } from '../src/types.js';
 
 const USAGE = `1session — cross-agent session Read Plane
@@ -29,8 +30,8 @@ const USAGE = `1session — cross-agent session Read Plane
   1session graph <session-id> [--json]                 会话之间的引用关系
   1session serve [--port 7777] [--host 127.0.0.1] [--token <t>] [--no-report]
                           起 HTTP Service，把本机会话接入 DreamMate Network
-  1session skill install|status|uninstall [--agent claude,codex,antigravity]
-                          [--copy] [--force] [--dry-run] [--json]  装到三家智能体的 skills 目录
+  1session skill install|status|uninstall [--agent claude,codex,antigravity,grok,dsh]
+                          [--copy] [--force] [--dry-run] [--json]  装到五家智能体的 skills 目录
   1session search <query> [--scope <path>|cwd|global] [--since 24h] [--limit n] [--provider name]
                           [--kind user,assistant,thinking,tool_call,tool_result]
                           [--regex] [--case] [--context n] [--max-hits n]
@@ -44,7 +45,8 @@ search 的每条命中带 T<轮次> · E<事件号>，可直接拼成 1session t
      --scope 取当前目录的相对路径或绝对路径，按子树匹配：--scope .. 含同级项目，
      --scope ~ 含 home 下全部；--global（= --scope global，= --scope /）跨全部项目。
 
-Providers: antigravity (~/.gemini/antigravity/brain), claude (~/.claude/projects), codex (~/.codex/sessions).
+Providers: antigravity (~/.gemini/antigravity/brain), claude (~/.claude/projects),
+           codex (~/.codex/sessions), dsh (~/.dsh/sessions), grok (~/.grok/sessions).
 `;
 
 interface Args {
@@ -589,7 +591,7 @@ async function main(): Promise<void> {
       const agents = str(flags.agent)
         ?.split(',')
         .map((name) => name.trim())
-        .filter(Boolean) as ('claude' | 'codex' | 'antigravity')[] | undefined;
+        .filter(Boolean) as SkillAgent[] | undefined;
       const options = {
         ...(agents?.length ? { agents } : {}),
         mode: flags.copy === true ? ('copy' as const) : ('link' as const),

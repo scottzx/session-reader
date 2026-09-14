@@ -50,6 +50,9 @@ export function looksLikeInstructions(text: string): boolean {
     /<user_instructions>/.test(head) ||
     /<environment_context>/.test(head) ||
     /^<permissions instructions>/.test(head) ||
+    // Grok opens every session with an ambient `<user_info>/<git_status>/<rules>`
+    // block; the real prompt arrives as its own message right after it.
+    /^<user_info>/.test(head) ||
     /^<recommended_plugins>/.test(head) ||
     /^Caveat: The messages below were generated/.test(head)
   );

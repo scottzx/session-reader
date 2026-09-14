@@ -24,10 +24,27 @@ const EDIT_TOOLS = new Set([
   'create_file',
   'apply_patch',
   'str_replace_editor',
+  'search_replace',
 ]);
-const FILE_ARGS = ['file_path', 'filePath', 'notebook_path', 'TargetFile', 'AbsolutePath', 'path'];
+const FILE_ARGS = [
+  'file_path',
+  'filePath',
+  'notebook_path',
+  'target_file',
+  'TargetFile',
+  'AbsolutePath',
+  'path',
+];
 
-const SHELL_TOOLS = new Set(['bash', 'run_command', 'shell', 'exec', 'local_shell', 'execute_command']);
+const SHELL_TOOLS = new Set([
+  'bash',
+  'run_command',
+  'run_terminal_command',
+  'shell',
+  'exec',
+  'local_shell',
+  'execute_command',
+]);
 const COMMAND_ARGS = ['command', 'CommandLine', 'cmd', 'input'];
 
 const PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm;

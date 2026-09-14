@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 /** The bundled skill's directory name, used as the entry name in every agent. */
 export const SKILL_NAME = '1session';
 
-export type SkillAgent = 'claude' | 'codex' | 'antigravity';
+export type SkillAgent = 'claude' | 'codex' | 'antigravity' | 'grok' | 'dsh';
 
 export interface AgentTarget {
   agent: SkillAgent;
@@ -18,8 +18,8 @@ export interface AgentTarget {
 }
 
 /**
- * All three agents load `<dir>/<name>/SKILL.md` with the same YAML frontmatter,
- * so one bundled skill can serve all of them unchanged.
+ * Every one of them loads `<dir>/<name>/SKILL.md` with the same YAML
+ * frontmatter, so one bundled skill can serve all of them unchanged.
  */
 export function agentTargets(home: string = os.homedir()): AgentTarget[] {
   return [
@@ -38,6 +38,16 @@ export function agentTargets(home: string = os.homedir()): AgentTarget[] {
       // Not ~/.gemini/skills — that belongs to gemini-cli, not Antigravity.
       homeDir: path.join(home, '.gemini', 'antigravity'),
       skillsDir: path.join(home, '.gemini', 'antigravity', 'skills'),
+    },
+    {
+      agent: 'grok',
+      homeDir: path.join(home, '.grok'),
+      skillsDir: path.join(home, '.grok', 'skills'),
+    },
+    {
+      agent: 'dsh',
+      homeDir: path.join(home, '.dsh'),
+      skillsDir: path.join(home, '.dsh', 'skills'),
     },
   ];
 }

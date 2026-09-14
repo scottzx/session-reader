@@ -3,11 +3,19 @@ import path from 'node:path';
 import { antigravityAdapter } from './parsers/antigravity.js';
 import { claudeAdapter } from './parsers/claude.js';
 import { codexAdapter } from './parsers/codex.js';
+import { dshAdapter } from './parsers/dsh.js';
+import { grokAdapter } from './parsers/grok.js';
 import type { ProviderAdapter, SessionCandidate } from './parsers/provider.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
 import type { AgentProvider, NormalizedSession, SessionRef } from './types.js';
 
-export const adapters: ProviderAdapter[] = [antigravityAdapter, claudeAdapter, codexAdapter];
+export const adapters: ProviderAdapter[] = [
+  antigravityAdapter,
+  claudeAdapter,
+  codexAdapter,
+  dshAdapter,
+  grokAdapter,
+];
 
 /** How many files we are willing to open when nothing narrows the search. */
 const DEFAULT_SCAN = 60;
@@ -62,11 +70,15 @@ function matchesWorkspace(ref: SessionRef, workspace: string): boolean {
 }
 
 /**
- * Claude stores sessions under a slugified cwd, so the directory name alone
- * tells us whether a file can possibly belong to the workspace.
+ * Whether a file can possibly belong to the workspace, judged from its path
+ * alone. Only ever used to skip an open, so it must never reject a session it
+ * is unsure about: Claude's slug is lossy (`-` stands for several characters),
+ * Grok's percent-encoded directory is exact, everyone else says "maybe".
  */
-function couldBelong(candidate: SessionCandidate, provider: AgentProvider, workspace: string): boolean {
-  if (provider !== 'claude') return true;
+function couldBelong(candidate: SessionCandidate, adapter: ProviderAdapter, workspace: string): boolean {
+  const exact = adapter.workspaceOf?.(candidate);
+  if (exact) return isInside(workspace, exact);
+  if (adapter.provider !== 'claude') return true;
   const slug = slugifyWorkspace(workspace);
   const dir = path.basename(path.dirname(candidate.path));
   return dir === slug || dir.startsWith(`${slug}-`);
@@ -90,7 +102,7 @@ export async function listResolvedSessions(options: ListOptions = {}): Promise<R
     for (const candidate of candidates) {
       if (sinceMs && candidate.mtimeMs < sinceMs) break; // candidates are newest first
       if (scanned >= budget) break;
-      if (workspace && !couldBelong(candidate, adapter.provider, workspace)) continue;
+      if (workspace && !couldBelong(candidate, adapter, workspace)) continue;
       scanned++;
       const ref = await adapter.scanRef(candidate).catch(() => undefined);
       if (!ref) continue;
