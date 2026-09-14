@@ -20,6 +20,8 @@ import { fileWrites, resolveWritePath, stripHeredocs } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
 import { installSkill, skillStatus, uninstallSkill } from '../src/skill.js';
+import { buildManifest, sessionUri } from '../src/serve/node.js';
+import { createServer } from '../src/serve/http.js';
 
 const VALID_KINDS = new Set(['user', 'assistant', 'thinking', 'tool_call', 'tool_result']);
 
@@ -808,4 +810,94 @@ test('skill install skips agents that are not installed, and can copy instead of
     current: false,
   });
   await fs.rm(home, { recursive: true, force: true });
+});
+
+/* ---------- serve: DreamMate Network Service ---------- */
+
+/** Boots the service on an ephemeral port so the tests never collide. */
+async function withServer<T>(
+  options: Parameters<typeof createServer>[0],
+  body: (base: string) => Promise<T>,
+): Promise<T> {
+  const server = createServer(options);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as import('node:net').AddressInfo;
+  try {
+    return await body(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+test('sessionUri renders the network-wide address of a session', () => {
+  assert.equal(sessionUri('mac', 'codex', '01a0907c'), 'session://mac/codex/01a0907c');
+  assert.equal(sessionUri('iphone', 'yima', 'abc123'), 'session://iphone/yima/abc123');
+});
+
+test('buildManifest satisfies the dreammate-network node contract', () => {
+  const manifest = buildManifest('http://scott-mac:7777');
+  // Required by schemas/node.schema.json.
+  assert.ok(manifest.node_id && manifest.name && manifest.type);
+  assert.ok(Array.isArray(manifest.services) && manifest.services.length > 0);
+
+  const service = manifest.services[0]!;
+  assert.equal(service.id, 'session-registry');
+  assert.equal(service.kind, 'session_registry');
+  // The four capability names the design doc pins down, plus turns.
+  for (const capability of ['sessions.list', 'sessions.read', 'sessions.search', 'sessions.graph']) {
+    assert.ok(service.capabilities.includes(capability), `missing ${capability}`);
+  }
+  // Transport lives in `access`, never in the capability name itself.
+  assert.deepEqual(service.access, [{ protocol: 'http', base_url: 'http://scott-mac:7777/v1' }]);
+  assert.ok(!service.capabilities.some((name) => /http|mcp|cli/i.test(name)));
+});
+
+test('serve answers /health and /manifest, and /v1/node mirrors /manifest', async () => {
+  await withServer({}, async (base) => {
+    const health = await fetch(`${base}/health`);
+    assert.equal(health.status, 200);
+    assert.equal(((await health.json()) as { status: string }).status, 'ok');
+
+    const manifest = await (await fetch(`${base}/manifest`)).json();
+    const node = await (await fetch(`${base}/v1/node`)).json();
+    assert.deepEqual(manifest, node);
+  });
+});
+
+test('serve is read-only and reports unknown routes and bad queries honestly', async () => {
+  await withServer({}, async (base) => {
+    assert.equal((await fetch(`${base}/manifest`, { method: 'POST' })).status, 405);
+    assert.equal((await fetch(`${base}/v1/nope`)).status, 404);
+    assert.equal((await fetch(`${base}/v1/search`)).status, 400);
+    assert.equal((await fetch(`${base}/v1/sessions/definitely-not-a-session`)).status, 404);
+  });
+});
+
+test('serve gates every route behind the token when one is set', async () => {
+  await withServer({ token: 's3cret' }, async (base) => {
+    assert.equal((await fetch(`${base}/manifest`)).status, 401);
+    assert.equal(
+      (await fetch(`${base}/manifest`, { headers: { authorization: 'Bearer wrong' } })).status,
+      401,
+    );
+    assert.equal(
+      (await fetch(`${base}/manifest`, { headers: { authorization: 'Bearer s3cret' } })).status,
+      200,
+    );
+    // The health check is not a way around it either.
+    assert.equal((await fetch(`${base}/health`)).status, 401);
+  });
+});
+
+test('serve stamps a session:// uri onto every listed session', async () => {
+  await withServer({}, async (base) => {
+    const body = (await (await fetch(`${base}/v1/sessions?limit=3`)).json()) as {
+      node: string;
+      sessions: { id: string; provider: string; uri: string }[];
+    };
+    assert.ok(body.node);
+    for (const session of body.sessions) {
+      assert.equal(session.uri, `session://${body.node}/${session.provider}/${session.id}`);
+    }
+  });
 });

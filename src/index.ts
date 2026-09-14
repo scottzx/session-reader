@@ -123,3 +123,14 @@ export {
   type SkillAgent,
   type UninstallResult,
 } from './skill.js';
+export {
+  buildManifest,
+  nodeIdentity,
+  nodeIdentityPath,
+  sessionUri,
+  SESSION_CAPABILITIES,
+  type AccessDescriptor,
+  type NetworkService,
+  type NodeManifest,
+} from './serve/node.js';
+export { createServer, serve, type ServeOptions } from './serve/http.js';

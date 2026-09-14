@@ -22,7 +22,9 @@ npm install -g @1agents/session-reader  # 作为 1session 命令
 npx @1agents/session-reader list      # 不安装直接用
 ```
 
-要求 Node.js >= 22.5（依赖内置的 `node:sqlite`），零运行时依赖。
+要求 Node.js >= 22.5（依赖内置的 `node:sqlite`）。
+唯一的运行时依赖是自家的 [`@1agents/dreammate-network`](https://github.com/scottzx/dreammate-network)
+——L0 协议定义，12 kB，本身零依赖——`npm install` 会自动带上，不需要单独装。
 
 ## 内置 skill：一条命令装到三家智能体
 
@@ -401,6 +403,52 @@ $ 1session graph ca8325e1
 本期只实装 `references` 与 `handoff_from`；`forked_from` / `resumed_from` / `sends_to` 在类型里预留但从不猜测。
 
 运行时捕获：若环境注入了 `SESSION_READER_CALLER_SESSION`，调用当下就直接落边（`observed / runtime:caller-env`），无需事后从历史里恢复。
+
+## `1session serve`：接入 DreamMate Network
+
+把本地 Read Plane 原样暴露成网络能力——`1session overview <id>` 成为 `sessions.read`。
+**不重新实现索引与事实层**，只是换一个调用入口。不引第三方 HTTP 框架，只用 `node:http`。
+
+```bash
+1session serve                                  # 默认 127.0.0.1:7777
+1session serve --host 100.x.x.x --token <t>     # 暴露到 tailnet
+```
+
+```
+GET /manifest              Node Manifest（dreammate-network node.schema.json）
+GET /health
+GET /v1/node               同 /manifest，本 Service 前缀下的同一份文档
+GET /v1/sessions           ?limit&scope&since&provider
+GET /v1/sessions/:id       会话概要
+GET /v1/sessions/:id/turns 逐轮概要
+GET /v1/search             ?q=&scope=&since=&limit=&provider=&kind=&regex=&case=
+GET /v1/graph/:id          会话之间的引用关系
+```
+
+声明的能力：`sessions.list` `sessions.read` `sessions.turns` `sessions.search` `sessions.graph`。
+
+每个会话都带上网络内的地址：
+
+```
+session://<node>/<runtime>/<session_id>
+session://Scott-Mac.local/claude/87f7a60a-a86e-49c5-b711-e463156a5420
+```
+
+**读取即落边。** 请求带 `X-Caller-Session: <调用方会话>` 时，读取当下就写入
+`调用方 --references--> 目标`，与 CLI 的 `SESSION_READER_CALLER_SESSION` 是同一条路径。
+两端都必须是本地已索引的会话，否则静默跳过——悬空边比没有边更糟。
+
+**节点身份**落在 `~/.1agents/session-reader/node.json`，首次启动生成，重启不变；
+`DREAMMATE_NODE_ID` / `DREAMMATE_NODE_NAME` / `DREAMMATE_TAILSCALE_NAME` 可覆盖。
+
+**只读、且默认只监听 loopback。** 会话原文含源码、shell 历史和恰好滚过屏幕的密钥，
+所以走出本机必须是一个刻意动作：显式 `--host`，并且最好配 `--token`（`Authorization: Bearer`）。
+非 loopback 且无 token 时启动会告警。非 GET 一律 405。
+
+> 协议定义来自 [`@1agents/dreammate-network`](https://github.com/scottzx/dreammate-network)（L0）。
+> `src/serve/node.ts` 直接 import 它的类型，不再本地抄一份——单向依赖 L2 → L0 是允许的，
+> 而共用同一份定义才谈得上「公共语言」。**schema 是唯一事实源，改类型先去改那个包。**
+> `/manifest` 的 `metadata.protocol_version` 报告本服务遵循的协议版本。
 
 ## 测试
 

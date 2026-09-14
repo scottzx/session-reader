@@ -164,8 +164,14 @@ export function captureRuntimeEdge(
   db: DatabaseSync,
   verb: string,
   target: string,
+  /**
+   * Who is doing the reading. Defaults to the CLI's injected caller; `1session
+   * serve` passes the `X-Caller-Session` header instead, so one process can
+   * serve several callers without going through the environment.
+   */
+  callerId = process.env.SESSION_READER_CALLER_SESSION,
 ): void {
-  const caller = process.env.SESSION_READER_CALLER_SESSION?.trim();
+  const caller = callerId?.trim();
   const relation = VERB_RELATION[verb];
   if (!caller || !relation) return;
   const from = findSessionRow(db, caller);
