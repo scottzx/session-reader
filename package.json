@@ -58,6 +58,6 @@
   },
   "dependencies": {
     "@1agents/dreammate-network": "^0.3.0",
-    "@1agents/dreammate-node": "^0.1.0"
+    "@1agents/dreammate-node": "^0.2.0"
   }
 }
