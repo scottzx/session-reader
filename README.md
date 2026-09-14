@@ -438,8 +438,25 @@ session://Scott-Mac.local/claude/87f7a60a-a86e-49c5-b711-e463156a5420
 `调用方 --references--> 目标`，与 CLI 的 `SESSION_READER_CALLER_SESSION` 是同一条路径。
 两端都必须是本地已索引的会话，否则静默跳过——悬空边比没有边更糟。
 
-**节点身份**落在 `~/.1agents/session-reader/node.json`，首次启动生成，重启不变；
-`DREAMMATE_NODE_ID` / `DREAMMATE_NODE_NAME` / `DREAMMATE_TAILSCALE_NAME` 可覆盖。
+**节点身份优先取自 tailscale**（`tailscale status --json` 的 `Self`，缓存 60s）：
+tailnet 已经维护了稳定 ID、唯一名字和操作系统，本机所有服务读到同一份，
+不会各自生成 id 把一台机器裂成几个 Node。
+
+```
+node_id   nigVtDS1s521CNTRL                            ← tailscale ID，重启不变
+name      scott-mac                                    ← DNSName 前缀
+type      macos                                        ← 由 tailscale 的 OS 映射
+base_url  http://scott-mac.tailfb4720.ts.net:7777/v1   ← MagicDNS，跨机可直接用
+```
+
+> ⚠️ 名字取 **DNSName** 而不是 HostName 是有原因的：iOS 设备的 HostName
+> 全是 `localhost`（实测 11 个节点里只有 9 个唯一），几台手机接进来会产出
+> 一模一样的 `session://localhost/yima/...`。DNSName 实测 11/11 唯一且可读。
+
+没装 / 没登录 tailscale 时**静默回退**到本地身份（hostname + 首次生成的 uuid，
+存在 `~/.1agents/node.json`）。回退身份的 name 不保证跨设备唯一，只适合单机自用。
+`manifest.metadata.identity_source` 会如实报告身份来自 `tailscale` 还是 `local`。
+`DREAMMATE_NODE_ID` / `DREAMMATE_NODE_NAME` 覆盖一切（容器或同机第二个实例用）。
 
 **只读、且默认只监听 loopback。** 会话原文含源码、shell 历史和恰好滚过屏幕的密钥，
 所以走出本机必须是一个刻意动作：显式 `--host`，并且最好配 `--token`（`Authorization: Bearer`）。

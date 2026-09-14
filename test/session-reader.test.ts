@@ -20,7 +20,8 @@ import { fileWrites, resolveWritePath, stripHeredocs } from '../src/writes.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from '../src/util/paths.js';
 import { looksLikeInstructions, stripPromptEnvelope } from '../src/util/text.js';
 import { installSkill, skillStatus, uninstallSkill } from '../src/skill.js';
-import { buildManifest, sessionUri } from '../src/serve/node.js';
+import { buildManifest, nodeIdentity, sessionUri } from '../src/serve/node.js';
+import { nodeTypeOf, resetTailscaleCache, tailscaleSelf } from '../src/serve/tailscale.js';
 import { createServer } from '../src/serve/http.js';
 
 const VALID_KINDS = new Set(['user', 'assistant', 'thinking', 'tool_call', 'tool_result']);
@@ -834,8 +835,8 @@ test('sessionUri renders the network-wide address of a session', () => {
   assert.equal(sessionUri('iphone', 'yima', 'abc123'), 'session://iphone/yima/abc123');
 });
 
-test('buildManifest satisfies the dreammate-network node contract', () => {
-  const manifest = buildManifest('http://scott-mac:7777');
+test('buildManifest satisfies the dreammate-network node contract', async () => {
+  const manifest = await buildManifest('http://scott-mac:7777');
   // Required by schemas/node.schema.json.
   assert.ok(manifest.node_id && manifest.name && manifest.type);
   assert.ok(Array.isArray(manifest.services) && manifest.services.length > 0);
@@ -847,9 +848,13 @@ test('buildManifest satisfies the dreammate-network node contract', () => {
   for (const capability of ['sessions.list', 'sessions.read', 'sessions.search', 'sessions.graph']) {
     assert.ok(service.capabilities.includes(capability), `missing ${capability}`);
   }
-  // Transport lives in `access`, never in the capability name itself.
-  assert.deepEqual(service.access, [{ protocol: 'http', base_url: 'http://scott-mac:7777/v1' }]);
-  assert.ok(!service.capabilities.some((name) => /http|mcp|cli/i.test(name)));
+  // Transport lives in `access`, never in the capability name itself. The host
+  // is whatever the node advertises (its MagicDNS name when tailscale is up),
+  // so only the shape is fixed here.
+  assert.equal(service.access?.length, 1);
+  assert.equal(service.access?.[0]!.protocol, 'http');
+  assert.match(service.access?.[0]!.base_url ?? '', /^http:\/\/.+\/v1$/);
+  assert.ok(!service.capabilities.some((name: string) => /http|mcp|cli/i.test(name)));
 });
 
 test('serve answers /health and /manifest, and /v1/node mirrors /manifest', async () => {
@@ -900,4 +905,64 @@ test('serve stamps a session:// uri onto every listed session', async () => {
       assert.equal(session.uri, `session://${body.node}/${session.provider}/${session.id}`);
     }
   });
+});
+
+/* ---------- Node 身份：tailscale 优先，本地回退 ---------- */
+
+test('nodeTypeOf 把 tailscale 的 OS 映射成 schema 的 node.type', () => {
+  assert.equal(nodeTypeOf('macOS'), 'macos');
+  assert.equal(nodeTypeOf('iOS'), 'ios');
+  assert.equal(nodeTypeOf('linux'), 'linux');
+  assert.equal(nodeTypeOf('windows'), 'windows');
+  // 没见过的值原样降级，不要为了枚举整齐把新平台挡在网络外面。
+  assert.equal(nodeTypeOf('plan9'), 'plan9');
+});
+
+test('nodeIdentity 总能给出可用身份，有没有 tailscale 都一样', async () => {
+  resetTailscaleCache();
+  const identity = await nodeIdentity();
+  assert.ok(identity.node_id, '任何情况下都得有 node_id');
+  assert.ok(identity.name, '任何情况下都得有 name');
+  assert.ok(identity.type, '任何情况下都得有 type');
+  assert.ok(['tailscale', 'local'].includes(identity.source));
+  // tailnet 的名字必须唯一且可读，所以绝不能是 iOS 那个人人都叫的 localhost。
+  if (identity.source === 'tailscale') {
+    assert.ok(identity.dnsName, 'tailscale 身份要带 MagicDNS 名');
+    assert.notEqual(identity.name, 'localhost');
+  }
+});
+
+test('环境变量能覆盖节点身份（容器 / 同机第二实例）', async () => {
+  const saved = [process.env.DREAMMATE_NODE_ID, process.env.DREAMMATE_NODE_NAME];
+  process.env.DREAMMATE_NODE_ID = 'node_forced';
+  process.env.DREAMMATE_NODE_NAME = 'forced-name';
+  try {
+    resetTailscaleCache();
+    const identity = await nodeIdentity();
+    assert.equal(identity.node_id, 'node_forced');
+    assert.equal(identity.name, 'forced-name');
+  } finally {
+    [process.env.DREAMMATE_NODE_ID, process.env.DREAMMATE_NODE_NAME] = saved as [string, string];
+    resetTailscaleCache();
+  }
+});
+
+test('tailscale 不可用时静默回退，不抛错', async () => {
+  const savedPath = process.env.PATH;
+  // 把 PATH 清空 = tailscale 找不到，等价于"没装"。
+  process.env.PATH = '/nonexistent';
+  try {
+    resetTailscaleCache();
+    assert.equal(await tailscaleSelf({ force: true }), undefined, '拿不到就该是 undefined');
+    const identity = await nodeIdentity();
+    assert.equal(identity.source, 'local', '应该回退到本地身份');
+    assert.ok(identity.node_id);
+    // 回退路径下 manifest 依然要完整。
+    const manifest = await buildManifest('http://localhost:7777');
+    assert.ok(manifest.node_id && manifest.name && manifest.type);
+    assert.equal(manifest.metadata?.identity_source, 'local');
+  } finally {
+    process.env.PATH = savedPath;
+    resetTailscaleCache();
+  }
 });

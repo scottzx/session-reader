@@ -77,7 +77,7 @@ async function noteRead(verb: string, target: string, caller?: string): Promise<
 
 async function route(ctx: Ctx): Promise<{ status: number; body: unknown }> {
   const { pathname } = ctx.url;
-  const identity = nodeIdentity();
+  const identity = await nodeIdentity();
 
   if (pathname === '/health') {
     return { status: 200, body: { status: 'ok', node_id: identity.node_id, service: 'session-registry' } };
@@ -86,7 +86,7 @@ async function route(ctx: Ctx): Promise<{ status: number; body: unknown }> {
   // `/manifest` is the network-wide contract; `/v1/node` is the same document
   // under this service's own prefix.
   if (pathname === '/manifest' || pathname === '/v1/node') {
-    return { status: 200, body: buildManifest(ctx.url.origin) };
+    return { status: 200, body: await buildManifest(ctx.url.origin) };
   }
 
   if (pathname === '/v1/sessions') {
@@ -199,7 +199,7 @@ export async function serve(options: ServeOptions = {}): Promise<http.Server> {
   const server = createServer(options);
   await new Promise<void>((resolve) => server.listen(options.port ?? 7777, host, resolve));
   const { port } = server.address() as AddressInfo;
-  const identity = nodeIdentity();
+  const identity = await nodeIdentity();
   console.log(`1session serve — node ${identity.name} (${identity.node_id})`);
   console.log(`  http://${host}:${port}/manifest`);
   console.log(`  capabilities: sessions.list, sessions.read, sessions.turns, sessions.search, sessions.graph`);

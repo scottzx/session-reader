@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { nodeTypeOf, tailscaleSelf } from './tailscale.js';
 import {
   PROTOCOL_VERSION,
   type AccessDescriptor,
@@ -21,9 +22,9 @@ export type { AccessDescriptor, NetworkService, NodeManifest };
 
 /* ---------- 身份 ---------- */
 
-/** Where the node identity is kept, next to the index db. */
+/** 回退身份的存放位置，与索引库并排。 */
 export function nodeIdentityPath(): string {
-  return path.join(os.homedir(), '.1agents', 'session-reader', 'node.json');
+  return path.join(os.homedir(), '.1agents', 'node.json');
 }
 
 const PLATFORM_TYPE: Record<string, string> = {
@@ -32,31 +33,53 @@ const PLATFORM_TYPE: Record<string, string> = {
   win32: 'windows',
 };
 
-interface StoredIdentity {
+export interface NodeIdentity {
   node_id: string;
   name: string;
   type: string;
+  /** 身份是从哪来的——诊断用，也让调用方知道该不该信任 `name` 的唯一性。 */
+  source: 'tailscale' | 'local';
+  /** MagicDNS 名，仅 tailscale 来源时有。 */
+  dnsName?: string;
 }
 
 /**
- * A stable node id that survives restarts, generated on first use and kept in
- * `~/.1agents/session-reader/node.json`.
+ * 本机在网络中的身份。
  *
- * `DREAMMATE_NODE_ID` / `DREAMMATE_NODE_NAME` override it without touching the
- * file, which is what a container or a second instance on one host wants.
+ * **优先 tailscale**：tailnet 已经维护了稳定 ID、唯一名字和操作系统，
+ * 本机所有服务读到的是同一份，不会各自生成 id 把一台机器裂成几个 Node。
+ *
+ * 拿不到就回退到本地身份（hostname + 首次生成的 uuid，存在
+ * `~/.1agents/node.json`）。注意回退身份的 `name` 不保证跨设备唯一——
+ * iOS 的 hostname 全是 `localhost`——所以只适合单机自用。
+ *
+ * `DREAMMATE_NODE_ID` / `DREAMMATE_NODE_NAME` 覆盖一切，容器或同机第二个
+ * 实例需要时用。
  */
-export function nodeIdentity(): StoredIdentity {
-  const type = PLATFORM_TYPE[process.platform] ?? process.platform;
+export async function nodeIdentity(): Promise<NodeIdentity> {
   const envId = process.env.DREAMMATE_NODE_ID?.trim();
   const envName = process.env.DREAMMATE_NODE_NAME?.trim();
-  if (envId && envName) return { node_id: envId, name: envName, type };
+
+  const ts = await tailscaleSelf();
+  if (ts) {
+    return {
+      node_id: envId ?? ts.id,
+      name: envName ?? ts.name,
+      type: nodeTypeOf(ts.os),
+      source: 'tailscale',
+      dnsName: ts.dnsName,
+    };
+  }
+
+  const type = PLATFORM_TYPE[process.platform] ?? process.platform;
+  if (envId && envName) return { node_id: envId, name: envName, type, source: 'local' };
 
   const file = nodeIdentityPath();
-  let stored: Partial<StoredIdentity> = {};
+  let stored: Partial<NodeIdentity> = {};
   try {
-    stored = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<StoredIdentity>;
+    stored = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<NodeIdentity>;
   } catch {
-    // First run, or an unreadable file we are about to overwrite.
+    // 首次运行，或者文件坏了——下面会覆盖掉。
   }
   if (!stored.node_id) {
     stored = { node_id: `node_${randomUUID().replace(/-/g, '').slice(0, 12)}`, name: os.hostname(), type };
@@ -67,6 +90,7 @@ export function nodeIdentity(): StoredIdentity {
     node_id: envId ?? stored.node_id!,
     name: envName ?? stored.name ?? os.hostname(),
     type,
+    source: 'local',
   };
 }
 
@@ -84,13 +108,20 @@ export const SESSION_CAPABILITIES = [
   'sessions.graph',
 ] as const;
 
-export function buildManifest(baseUrl: string): NodeManifest {
-  const identity = nodeIdentity();
+export async function buildManifest(baseUrl: string): Promise<NodeManifest> {
+  const identity = await nodeIdentity();
+  // 有 MagicDNS 就用它：`http://scott-mac:7777` 跨网络稳定，不怕 IP 变，
+  // 而请求里的 Host 只是"调用方碰巧用了哪个地址"。
+  const advertised = identity.dnsName
+    ? baseUrl.replace(/\/\/[^/]+/, `//${identity.dnsName}:${new URL(baseUrl).port || '7777'}`)
+    : baseUrl;
   return {
-    ...identity,
-    tailscale_name: process.env.DREAMMATE_TAILSCALE_NAME?.trim() ?? identity.name,
+    node_id: identity.node_id,
+    name: identity.name,
+    type: identity.type,
+    tailscale_name: identity.dnsName ?? process.env.DREAMMATE_TAILSCALE_NAME?.trim() ?? null,
     online: true,
-    metadata: { protocol_version: PROTOCOL_VERSION },
+    metadata: { protocol_version: PROTOCOL_VERSION, identity_source: identity.source },
     services: [
       {
         id: 'session-registry',
@@ -98,13 +129,19 @@ export function buildManifest(baseUrl: string): NodeManifest {
         kind: 'session_registry',
         capabilities: [...SESSION_CAPABILITIES],
         resources: [{ scheme: 'session', description: 'session://<node>/<runtime>/<session_id>' }],
-        access: [{ protocol: 'http', base_url: `${baseUrl}/v1` }],
+        access: [{ protocol: 'http', base_url: `${advertised}/v1` }],
       },
     ],
   };
 }
 
-/** `session://<node>/<runtime>/<session_id>` — the network-wide address of one session. */
+/**
+ * `session://<node>/<runtime>/<session_id>` — 一个会话在网络中的地址。
+ *
+ * `nodeName` 应该来自 {@link nodeIdentity}，也就是 tailnet 的 DNSName 前缀。
+ * **不要传 `os.hostname()`**：iOS 设备的 hostname 全是 `localhost`，几台手机
+ * 接进来会产出一模一样的 `session://localhost/yima/...`。
+ */
 export function sessionUri(nodeName: string, provider: string, id: string): SessionURI {
   return `session://${nodeName}/${provider}/${id}`;
 }
