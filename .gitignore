@@ -1,2 +1,14 @@
 node_modules/
 dist/
+
+# OS / tooling junk
+.DS_Store
+
+# Agent + tool local state
+.1agents/
+.agents/
+.claude/
+.playwright-mcp/
+
+# Local skill bundle (rebuilt from skills/1session/)
+skills/*.zip
