@@ -1,0 +1,4 @@
+# DeepSeek Harness bundle patch for @1agents/session-reader
+- insert:
+    - id: session-reader
+      name: '@1agents/session-reader'

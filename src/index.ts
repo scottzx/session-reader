@@ -146,3 +146,5 @@ export {
   type NodeManifest,
 } from './serve/node.js';
 export { createServer, serve, type ServeOptions } from './serve/http.js';
+export { convertSessionToDshEvents, type DshSessionEvent, type ConvertOptions } from './dsh/adapter.js';
+export { apply, inject, name } from './dsh/index.js';

@@ -473,6 +473,18 @@ $ 1session graph ca8325e1
 
 运行时捕获：若环境注入了 `SESSION_READER_CALLER_SESSION`，调用当下就直接落边（`observed / runtime:caller-env`），无需事后从历史里恢复。
 
+## `1session web`：独立浏览器
+
+没有 DSH 也能看同一套历史会话列表、对话预览和文件账本：
+
+```bash
+1session web                 # http://127.0.0.1:7780
+1session web --open          # 启动后打开默认浏览器
+1session web --scope global  # 默认列出全部工作区
+```
+
+列表只拉元数据，点击某一条会话后再加载对话与文件。这和 `1session serve`（DreamMate Network 的 JSON 服务）不是同一件事。
+
 ## `1session serve`：接入 DreamMate Network
 
 把本地 Read Plane 原样暴露成网络能力——`1session overview <id>` 成为 `sessions.read`。

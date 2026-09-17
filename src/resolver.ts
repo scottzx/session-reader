@@ -32,6 +32,13 @@ export interface ListOptions {
    */
   useIndex?: boolean;
   /**
+   * When true (default), fingerprint-sweep every on-disk candidate so the
+   * listing is complete and fresh. Set false to query the index only — no
+   * parse, no all-files sweep. The DSH panel uses this so opening it does
+   * not load every session; click a row to load that one.
+   */
+  refresh?: boolean;
+  /**
    * How many session files may be opened. Defaults to a small budget so an
    * unfiltered `list` stays cheap; pass `Infinity` when completeness matters
    * more than latency (indexing, search).
@@ -135,8 +142,21 @@ async function listIndexedSessions(options: ListOptions): Promise<SessionRef[]> 
   const { listSessionRows, refOf } = await import('./store/read.js');
   const db = await openStore();
   const sinceMs = parseSince(options.since);
-  const ids: string[] = [];
+  const scoped = options.workspace ? canonicalizePath(options.workspace) : undefined;
+  const query = {
+    ...(scoped && scoped !== '/' ? { workspace: scoped } : {}),
+    ...(options.provider ? { provider: options.provider } : {}),
+    ...(sinceMs ? { sinceMs } : {}),
+    limit: options.limit ?? 20,
+  };
 
+  // Skip the all-files fingerprint sweep: the caller only wants whatever
+  // the index already knows. Used by the DSH panel's lazy listing.
+  if (options.refresh === false) {
+    return listSessionRows(db, query).map(refOf);
+  }
+
+  const ids: string[] = [];
   for (const adapter of adapters) {
     if (options.provider && adapter.provider !== options.provider) continue;
     for (const candidate of await adapter.listCandidates()) {
@@ -148,14 +168,7 @@ async function listIndexedSessions(options: ListOptions): Promise<SessionRef[]> 
     }
   }
 
-  const scoped = options.workspace ? canonicalizePath(options.workspace) : undefined;
-  return listSessionRows(db, {
-    ids,
-    ...(scoped && scoped !== '/' ? { workspace: scoped } : {}),
-    ...(options.provider ? { provider: options.provider } : {}),
-    ...(sinceMs ? { sinceMs } : {}),
-    limit: options.limit ?? 20,
-  }).map(refOf);
+  return listSessionRows(db, { ids, ...query }).map(refOf);
 }
 
 export async function findSessionsByWorkspace(

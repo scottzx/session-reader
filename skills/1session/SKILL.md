@@ -1,6 +1,6 @@
 ---
 name: 1session
-description: Search and read the user's past AI coding sessions across Claude Code, Codex, Antigravity, Grok and DeepSeek Harness (dsh) from their raw local session files, using the `1session` CLI. Use this whenever the user refers to work they did in an earlier session rather than in this conversation — "上次/之前/昨天我们改了什么", "那个报错后来怎么解决的", "我在哪个会话里提过 X", "这个功能是哪一轮加的", "codex 那边做到哪了", "grok/dsh 那边呢", "跨项目找一下", "整理一下最近几天的会话/写个周报". Also reach for it proactively, before asking the user to re-explain context they have obviously already established with some agent on this machine — the answer is usually already on disk. Read-only: it never modifies or resumes a session. This skill also covers getting itself running and spreading to other agents: when the `1session` CLI is missing it falls back to `npx` on the spot, and it knows how to install the package globally and push the skill into all five agents at once — so use it too when the user asks to install, upgrade, uninstall, share or distribute 1session / session-reader, or reports that the `1session` command is not found.
+description: 通过 1session CLI 从本地原始会话文件中检索并读取用户在 Claude Code、Codex、Antigravity、Grok 和 DeepSeek Harness (dsh) 中沉淀的历史 AI 编程会话。每当用户提及之前会话中完成的工作而非当前对话内容时激活此技能——例如“上次/之前/昨天我们改了什么”、“那个报错后来怎么解决的”、“我在哪个会话里提过 X”、“这个功能是哪一轮加的”、“codex 那边做到哪了”、“grok/dsh 那边呢”、“跨项目找一下”、“整理一下最近几天的会话/写个周报”。在要求用户重复解释本机上已有明确记录的上下文之前，也应主动调用此技能——答案通常已保存在磁盘中。纯只读设计：绝不修改或恢复历史会话。本技能还包含自身的自举运行与分发逻辑：在未安装 1session CLI 时自动降级为 npx 随用随走，并支持将包全局安装以及一键同步技能至全部五款 Agent——因此当用户要求安装、升级、卸载、分享或分发 1session / session-reader，或报告未找到 1session 命令时也可使用本技能。
 ---
 
 # 1session — the cross-agent Read Plane
@@ -79,6 +79,7 @@ whole ladder by reflex:
 | "find where we talked about X / which turn was that" | `turns` |
 | "what exactly did it do at step N" | `turn <n>`, then `--event k` |
 | "what did all the agents do in this project" | `workspace` |
+| "open a browser / web UI for sessions" (no DSH) | `web` |
 
 "What happened in that session" and "find where we talked about X" look like the
 same question and are not. `overview` compresses a session into statistics and

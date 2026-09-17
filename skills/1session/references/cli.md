@@ -141,6 +141,22 @@ The file ledger never contains `candidate` paths — a path only enters after a
 write is proven. Here-doc bodies are stripped before command analysis, so source
 code being written to a file cannot masquerade as a redirect or an `ssh` host.
 
+## Standalone web UI
+
+```
+1session web [--port 7780] [--host 127.0.0.1] [--open] [--scope <path>|cwd|global]
+```
+
+A local browser for the same session list, chat preview and file ledger the DSH
+plugin shows. Does not require DSH. Default bind is loopback `127.0.0.1:7780`.
+
+The listing is metadata-only; clicking a row loads that session's turns and
+files. `--open` launches the default browser. `--scope global` starts the UI
+on every workspace; a path scopes "当前工作区" to that directory.
+
+This is not `1session serve`. `serve` is the DreamMate Network JSON service;
+`web` is a human-facing page.
+
 ## Index and graph
 
 ```

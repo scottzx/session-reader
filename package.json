@@ -29,6 +29,23 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
+    },
+    "./client": {
+      "types": "./dist/src/dsh/client.d.ts",
+      "default": "./dist/src/dsh/client.js"
+    },
+    "./dsh": {
+      "types": "./dist/src/dsh/index.d.ts",
+      "import": "./dist/src/dsh/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "bin": {
@@ -37,6 +54,7 @@
   "files": [
     "dist",
     "skills",
+    "cordis.patch.yml",
     "README.md"
   ],
   "publishConfig": {
@@ -44,9 +62,9 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/bundle-client.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test test/session-reader.test.ts",
+    "test": "node --import tsx --test test/session-reader.test.ts test/dsh-adapter.test.ts test/web.test.ts",
     "prepack": "npm run build",
     "1session": "tsx bin/1session.ts"
   },
@@ -55,11 +73,14 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "esbuild": "^0.28.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },
   "dependencies": {
+    "@1agents/chat-ui": "^0.1.0",
     "@1agents/dreammate-network": "^0.3.0",
-    "@1agents/dreammate-node": "^0.4.0"
+    "@1agents/dreammate-node": "^0.4.0",
+    "preact": "^10.19.6"
   }
 }

@@ -409,6 +409,20 @@ test('listRecentSessions returns newest-first refs across providers', async (t) 
   assert.deepEqual(times, [...times].sort((a, b) => b - a));
 });
 
+test('listRecentSessions({ refresh: false }) reads index metadata without a full sweep', async () => {
+  const started = Date.now();
+  const refs = await listRecentSessions({ limit: 8, refresh: false });
+  const elapsed = Date.now() - started;
+  assert.ok(Array.isArray(refs));
+  assert.ok(refs.length <= 8);
+  for (const ref of refs) {
+    assert.ok(ref.id);
+    assert.ok(ref.provider);
+  }
+  // A metadata-only index query must not hang the way a full parse sweep does.
+  assert.ok(elapsed < 5_000, `lazy list took ${elapsed}ms`);
+});
+
 test('workspaceFromTrajectoryBlob reads the folder Antigravity opened', () => {
   // field 1 { field 1: "file:///tmp/a b", field 4: "master" }
   const uri = Buffer.from('file:///tmp/a%20b', 'utf8');

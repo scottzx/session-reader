@@ -30,6 +30,8 @@ const USAGE = `1session — cross-agent session Read Plane
   1session graph <session-id> [--json]                 会话之间的引用关系
   1session serve [--port 7777] [--host 127.0.0.1] [--token <t>] [--no-report]
                           起 HTTP Service，把本机会话接入 DreamMate Network
+  1session web [--port 7780] [--host 127.0.0.1] [--open] [--scope <path>|cwd|global]
+                          起独立 Web 端，浏览历史会话列表、对话与文件（无需 DSH）
   1session skill install|status|uninstall [--agent claude,codex,antigravity,grok,dsh]
                           [--copy] [--force] [--dry-run] [--json]  装到五家智能体的 skills 目录
   1session search <query> [--scope <path>|cwd|global] [--since 24h] [--limit n] [--provider name]
@@ -58,7 +60,7 @@ interface Args {
 /** Flags that never take a value, so they cannot swallow a positional. */
 const BOOLEAN_FLAGS = new Set([
   'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index', 'global',
-  'copy', 'dry-run', 'no-report', 'include-self',
+  'copy', 'dry-run', 'no-report', 'include-self', 'open',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -580,6 +582,28 @@ async function main(): Promise<void> {
         ...(flags['no-report'] === true ? { report: false } : {}),
       });
       // The server owns the process from here; nothing after this resolves.
+      await new Promise(() => {});
+      break;
+    }
+
+    case 'web': {
+      const { serveWeb, DEFAULT_WEB_PORT } = await import('../src/web/server.js');
+      const scope = str(flags.scope) ?? (flags.global === true ? 'global' : 'cwd');
+      let cwd = process.cwd();
+      let defaultScope: 'cwd' | 'global' = 'cwd';
+      if (scope === 'global') {
+        defaultScope = 'global';
+      } else if (scope !== 'cwd') {
+        cwd = canonicalizePath(scope);
+        if (!existsSync(cwd)) throw new Error(`--scope 目录不存在：${scope}`);
+      }
+      await serveWeb({
+        port: num(flags.port) ?? DEFAULT_WEB_PORT,
+        host: str(flags.host) ?? '127.0.0.1',
+        cwd,
+        defaultScope,
+        open: flags.open === true,
+      });
       await new Promise(() => {});
       break;
     }
