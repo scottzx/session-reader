@@ -252,8 +252,14 @@ test('plugin GET /sessions returns index metadata only; GET /session/:id loads o
 test('DSH browser client bundle registers with ModuleLoader exactly once and exports apply and inject', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
+  const { execFileSync } = await import('node:child_process');
   const clientBundlePath = path.resolve('dist/src/dsh/client.js');
+  const webBundlePath = path.resolve('dist/src/web/app.js');
+  if (!fs.existsSync(clientBundlePath) || !fs.existsSync(webBundlePath)) {
+    execFileSync(process.execPath, ['scripts/bundle-client.js'], { stdio: 'inherit' });
+  }
   assert(fs.existsSync(clientBundlePath), 'dist/src/dsh/client.js must exist after build');
+  assert(fs.existsSync(webBundlePath), 'dist/src/web/app.js must exist after build');
 
   const bundleCode = fs.readFileSync(clientBundlePath, 'utf8');
 
