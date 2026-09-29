@@ -2,51 +2,59 @@
 import { mountConversation, renderMarkdown } from '@1agents/chat-ui';
 
 const CSS_TEXT = `
+/* Match DSH SidebarRoot panel rows in expanded and collapsed layouts. */
 [data-dsh-session-reader-entry] {
   box-sizing: border-box;
-  width: 100%;
-  height: 36px;
-  color: var(--dsw-alias-label-secondary, #666);
+  flex: none;
+  min-height: 36px;
+  margin: 0 2px 4px;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
   white-space: nowrap;
   background: transparent;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--dsw-radius-md);
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
-  font-size: 13px;
+  padding: 7px 8px;
+  font: inherit;
+  line-height: 22px;
+  text-align: left;
   display: flex;
-  transition: background 0.15s ease, color 0.15s ease;
 }
 [data-dsh-session-reader-entry]:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,0.05));
-  color: var(--dsw-alias-label-primary, #111);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
-body[data-ds-dark-theme] [data-dsh-session-reader-entry]:hover {
-  background: rgba(255,255,255,0.08);
-  color: #fff;
+[data-dsh-session-reader-entry]:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
 }
 [data-dsh-session-reader-entry] .sr-icon {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+}
+[data-dsh-session-reader-entry] .sr-icon svg {
+  width: 16px;
+  height: 16px;
 }
 [data-dsh-session-reader-entry] .sr-label {
+  min-width: 0;
   text-overflow: ellipsis;
   overflow: hidden;
 }
 [data-dsh-frame][data-sidebar-collapsed] [data-dsh-session-reader-entry],
 [data-sidebar-collapsed] [data-dsh-session-reader-entry] {
-  border-radius: 50%;
   justify-content: center;
   width: 36px;
   height: 36px;
-  margin: 0 auto 12px;
+  margin: 0 0 12px;
   padding: 0;
+}
+[data-sidebar-collapsed] [data-dsh-session-reader-entry] .sr-icon svg {
+  width: 18px;
+  height: 18px;
 }
 [data-dsh-frame][data-sidebar-collapsed] [data-dsh-session-reader-entry] .sr-label,
 [data-sidebar-collapsed] [data-dsh-session-reader-entry] .sr-label {

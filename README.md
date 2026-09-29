@@ -473,6 +473,10 @@ $ 1session graph ca8325e1
 
 运行时捕获：若环境注入了 `SESSION_READER_CALLER_SESSION`，调用当下就直接落边（`observed / runtime:caller-env`），无需事后从历史里恢复。
 
+## DSH 插件入口
+
+DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。入口沿用「插件」「自动化任务」的主文字色、字号、行高、圆角、悬停与键盘焦点样式；展开时使用 16px 图标，折叠时使用 18px 图标和 36px 按钮，颜色跟随 DSH 的亮暗主题。
+
 ## `1session web`：独立浏览器
 
 没有 DSH 也能看同一套历史会话列表、对话预览和文件账本：
