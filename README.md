@@ -481,7 +481,7 @@ $ 1session graph ca8325e1
 pnpm dsh plugin --profile web add @1agents/session-reader @1agents/dsh-acp
 ```
 
-只查看历史时可只安装 `@1agents/session-reader`；插件按请求查询 ACP 服务，不把 ACP 注册为加载依赖。已安装独立 `dsh` 命令时省略开头的 `pnpm`；桌面版将 profile 改为 `desktop`。更新包后重启对应的 DSH 服务。原会话续聊还需单独启动 `@1agents/acp-service@^0.2.0`，具体配置见 [ACP 插件说明](https://github.com/scottzx/1acp/tree/main/packages/dsh-plugin)。
+只查看历史时可只安装 `@1agents/session-reader`；插件按请求查询 ACP 服务，不把 ACP 注册为加载依赖。已安装独立 `dsh` 命令时省略开头的 `pnpm`；桌面版将 profile 改为 `desktop`。更新包后重启对应的 DSH 服务。使用 `@1agents/dsh-acp@>=0.2.0` 时，插件默认自动启动或复用本地 ACP 服务，无需另开终端；远程地址或 `serviceMode: external` 仍由外部管理。具体配置见 [ACP 插件说明](https://github.com/scottzx/1acp/tree/main/packages/dsh-plugin)。
 
 DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。入口沿用「插件」「自动化任务」的主文字色、字号、行高、圆角、悬停与键盘焦点样式；展开时使用 16px 图标，折叠时使用 18px 图标和 36px 按钮，颜色跟随 DSH 的亮暗主题。
 
