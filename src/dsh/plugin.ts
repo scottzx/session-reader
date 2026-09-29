@@ -12,7 +12,8 @@ import { openSessionInDsh, continuationAvailability } from './open.js';
 import type { AgentProvider } from '../types.js';
 
 export const name = 'session-reader';
-export const inject = { tools: { required: true }, webServer: { required: true }, sessionController: { required: true }, workspaceRegistry: { required: true }, oneagentsAcpSessions: { required: false } };
+// ACP is queried through ctx.get so history browsing remains available without it.
+export const inject = ['tools', 'webServer', 'sessionController', 'workspaceRegistry'];
 
 export function apply(ctx: any) {
   // 1. Register tools if ctx.tools is present

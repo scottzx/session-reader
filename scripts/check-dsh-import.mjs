@@ -35,3 +35,33 @@ assert.throws(() => {
   for (const event of withoutHead) invalid.decodeRow(catalog.encodeCurrentEvent(event));
   invalid.finish();
 }, /protected first surface head/);
+
+// Exercise the actual Cordis loader: every inject entry is a required service.
+const { Context } = await import(pathToFileURL(resolve(root, 'vendor/cordis/lib/index.js')).href);
+const plugin = await import('../dist/src/dsh/plugin.js');
+const ctx = new Context();
+let route;
+for (const name of ['tools', 'webServer', 'sessionController', 'workspaceRegistry']) {
+  ctx.provide(name, { register(value) { if (name === 'webServer') route = value; return () => {}; } });
+}
+try {
+  const fiber = ctx.plugin(plugin);
+  await fiber.await();
+  fiber.assertActive();
+  assert.ok(route, 'history route must load without ACP');
+  const request = { url: '/api/session-reader/continuation?provider=codex', headers: { host: 'localhost' }, method: 'GET' };
+  const response = { setHeader() {}, end(value) { this.body = JSON.parse(value); } };
+  await route.handler(request, response);
+  assert.equal(response.body.available, false);
+  assert.match(response.body.reason, /dsh-acp/);
+  const removeAcp = ctx.provide('oneagentsAcpSessions', { availability: async () => ({ available: true, agent: 'codex' }) });
+  await route.handler(request, response);
+  assert.equal(response.body.available, true);
+  removeAcp();
+  await route.handler(request, response);
+  assert.equal(response.body.available, false);
+  fiber.assertActive();
+} finally {
+  await ctx.fiber.dispose();
+}
+console.log('Reader stays active as the optional ACP service appears and disappears');
