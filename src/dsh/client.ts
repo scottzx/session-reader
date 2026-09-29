@@ -1,5 +1,6 @@
 // Browser client entry for @1agents/session-reader in DSH Web
 import { mountConversation, renderMarkdown } from '@1agents/chat-ui';
+import { continuationCopy, continuationDictionaries } from './copy.js';
 
 const CSS_TEXT = `
 /* Match DSH SidebarRoot panel rows in expanded and collapsed layouts. */
@@ -427,7 +428,7 @@ body[data-ds-dark-theme] .sr-tab-btn.active {
 
 const ICON_SVG = `<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><polyline points="8 4.2 8 8 10.5 9.5"/></svg>`;
 
-export const inject = ['sessions', 'workspaces'];
+export const inject = ['sessions', 'workspaces', 'uiWorkspace', 'locale'];
 
 type SrTab = 'chat' | 'overview' | 'files';
 
@@ -449,6 +450,9 @@ function isStandalone(): boolean {
 
 export function apply(_ctx: any) {
   if (typeof document === 'undefined') return;
+  if (_ctx.locale) _ctx.effect(() => _ctx.locale.register('sessionReaderContinuation', continuationDictionaries));
+  const translate = _ctx.locale?.bind('sessionReaderContinuation');
+  const getContinuationCopy = () => continuationCopy(translate);
 
   // 1. Inject Styles
   if (!document.getElementById('dsh-session-reader-css')) {
@@ -543,51 +547,30 @@ export function apply(_ctx: any) {
     currentTab = 'chat';
   }
 
-  async function openInDshChat(sessionId: string, btn?: HTMLElement) {
-    if (btn) {
-      btn.innerHTML = '⏳ 正在加载到 DSH...';
-      (btn as any).disabled = true;
-    }
+  async function openInDshChat(sessionId: string, btn?: HTMLElement, provider?: string) {
+    const copy = getContinuationCopy();
+    const label = btn?.textContent;
+    if (btn) { btn.textContent = copy.loading; (btn as HTMLButtonElement).disabled = true; }
     try {
-      const activeWs = getActiveWorkspaceInfo();
       const res = await fetch('/api/session-reader/open-in-dsh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId,
-          currentCwd: activeWs.cwd,
-          workspaceId: activeWs.workspaceId,
-        }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, provider }),
       });
       const result = await res.json();
-      if (!res.ok || !result.success) {
-        alert('接入 DSH 失败: ' + (result.error || res.statusText));
-        if (btn) {
-          btn.innerHTML = '🚀 在 DSH 官方 Chat 中打开';
-          (btn as any).disabled = false;
-        }
-        return;
-      }
-      const dshSessionId = result.dshSessionId;
-      closePanel();
-
+      if (!res.ok || !result.success) throw new Error(result.error || res.statusText);
       const sessions = dshCtx?.get ? (dshCtx.get('sessions') ?? dshCtx.sessions) : dshCtx?.sessions;
-      if (sessions) {
-        if (typeof sessions.refresh === 'function') {
-          await sessions.refresh();
-        }
-        if (typeof sessions.open === 'function') {
-          sessions.open(dshSessionId);
-        }
-      } else {
-        console.warn('[session-reader] Could not obtain DSH sessions service from ctx');
-      }
+      const navigation = dshCtx?.get ? dshCtx.get('uiWorkspace') : dshCtx?.uiWorkspace;
+      if (!navigation) throw new Error(copy.navigationUnavailable);
+      await sessions.refresh();
+      navigation.openSession(result.dshSessionId);
+      closePanel();
     } catch (err: any) {
-      alert('请求出错: ' + (err?.message || err));
-      if (btn) {
-        btn.innerHTML = '🚀 在 DSH 官方 Chat 中打开';
-        (btn as any).disabled = false;
+      if (activeSessionData) {
+        activeSessionData.continuationError = copy.failed + (err?.message || err);
+        renderModalBody();
       }
+    } finally {
+      if (btn) { btn.textContent = label ?? copy.continue; (btn as HTMLButtonElement).disabled = false; }
     }
   }
 
@@ -617,6 +600,19 @@ export function apply(_ctx: any) {
       const data = await res.json();
       if (detailAbort !== ac) return;
       activeSessionData = data;
+      renderModalBody();
+      if (!isStandalone()) {
+        try {
+          const status = await fetch(`/api/session-reader/continuation?provider=${encodeURIComponent(data.ref.provider)}`, { signal: ac.signal, cache: 'no-store' });
+          if (!status.ok) throw new Error(`HTTP ${status.status}`);
+          const continuation = await status.json();
+          if (detailAbort !== ac) return;
+          activeSessionData.continuation = continuation;
+        } catch (error) {
+          if (detailAbort !== ac) return;
+          activeSessionData.continuation = { available: false, reason: String(error) };
+        }
+      }
     } catch (err: any) {
       if (err?.name === 'AbortError') {
         if (detailAbort === ac) {
@@ -714,9 +710,6 @@ export function apply(_ctx: any) {
         item.classList.add('active');
         loadSessionDetail(s.id);
       });
-      item.addEventListener('dblclick', () => {
-        openInDshChat(s.id);
-      });
       listEl.appendChild(item);
     });
   }
@@ -740,7 +733,8 @@ export function apply(_ctx: any) {
       return;
     }
 
-    const { ref, overview, turns, files } = activeSessionData;
+    const { ref, overview, turns, files, continuation, continuationError } = activeSessionData;
+    const copy = getContinuationCopy();
     const standalone = isStandalone();
     const body =
       currentTab === 'chat'
@@ -756,8 +750,8 @@ export function apply(_ctx: any) {
             ${escapeHtml(ref.title || 'Untitled')}
           </div>
           <div class="sr-header-actions">
-            ${standalone ? '' : `<button class="sr-open-dsh-btn" id="sr-btn-open-dsh" title="将此历史会话接入并在 DSH 官方主聊天窗口中查看">
-              🚀 在 DSH 官方 Chat 中打开
+            ${standalone ? '' : `<button class="sr-open-dsh-btn" id="sr-btn-open-dsh" ${continuation?.available ? '' : 'disabled'}>
+              ${escapeHtml(continuation?.available ? (ref.provider === 'dsh' ? copy.openDsh : copy.continue) + ' · ' + (continuation.agent || ref.provider) : copy.readOnly)}
             </button>`}
             <div class="sr-tabs">
               <button class="sr-tab-btn ${currentTab === 'chat' ? 'active' : ''}" data-tab="chat">💬 快速预览</button>
@@ -766,6 +760,7 @@ export function apply(_ctx: any) {
             </div>
           </div>
         </div>
+        ${!standalone && (continuationError || !continuation?.available) ? `<div class="sr-header-path" role="status">${escapeHtml(continuationError || continuation?.reason || copy.unavailable)}</div>` : ''}
         <div class="sr-header-path" title="${escapeHtml(ref.path || '')}">
           <span class="sr-header-provider">${ref.provider}</span> · 路径: ${escapeHtml(ref.path || '')}
         </div>
@@ -778,7 +773,7 @@ export function apply(_ctx: any) {
     const openDshBtn = contentEl.querySelector('#sr-btn-open-dsh');
     if (openDshBtn) {
       openDshBtn.addEventListener('click', () => {
-        openInDshChat(activeSessionId!, openDshBtn as HTMLElement);
+        openInDshChat(ref.path || activeSessionId!, openDshBtn as HTMLElement, ref.provider);
       });
     }
 

@@ -45,7 +45,8 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-client-ui-workspace", "@deepseek-ai/dsh-client-locale"]
     }
   },
   "bin": {
@@ -64,7 +65,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/bundle-client.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test test/session-reader.test.ts test/dsh-adapter.test.ts test/web.test.ts",
+    "test": "node --import tsx --test test/session-reader.test.ts test/dsh-adapter.test.ts test/dsh-open.test.ts test/web.test.ts",
     "prepack": "npm run build",
     "1session": "tsx bin/1session.ts"
   },

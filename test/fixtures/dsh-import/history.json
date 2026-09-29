@@ -1,0 +1,66 @@
+{
+  "ref": {
+    "id": "native-fixture",
+    "provider": "codex",
+    "path": "/fixtures/native.jsonl",
+    "workspace": "/fixtures/workspace",
+    "title": "Native history",
+    "createdAt": "2026-09-01T00:00:00.000Z"
+  },
+  "stats": {
+    "models": [
+      "fixture-model"
+    ],
+    "branches": [],
+    "fileChanges": [],
+    "uploads": [],
+    "backgroundTasks": [],
+    "turnBoundaries": [],
+    "commands": [],
+    "extras": {}
+  },
+  "artifacts": [],
+  "turns": [
+    {
+      "id": "question",
+      "index": 0,
+      "kind": "user",
+      "text": "Read the file"
+    },
+    {
+      "id": "thought",
+      "index": 1,
+      "kind": "thinking",
+      "text": "I will inspect it."
+    },
+    {
+      "id": "read-1",
+      "index": 2,
+      "kind": "tool_call",
+      "toolName": "Read",
+      "toolArgs": {
+        "path": "example.txt"
+      }
+    },
+    {
+      "id": "read-1",
+      "index": 3,
+      "kind": "tool_result",
+      "toolName": "Read",
+      "toolResult": "File content",
+      "exitCode": 0
+    },
+    {
+      "id": "answer",
+      "index": 4,
+      "kind": "assistant",
+      "text": "The file contains File content."
+    },
+    {
+      "id": "unfinished",
+      "index": 5,
+      "kind": "user",
+      "text": "A question that was never answered"
+    }
+  ]
+}

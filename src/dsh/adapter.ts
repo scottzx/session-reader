@@ -28,15 +28,17 @@ export function convertSessionToDshEvents(
   let currentStep = 1;
   let turnOpen = false;
   let stepOpen = false;
+  let hasSystemHead = false;
 
   const defaultTime = session.ref.createdAt
     ? Date.parse(session.ref.createdAt)
     : Date.now();
+  const fallbackTime = Number.isFinite(defaultTime) ? defaultTime : Date.now();
 
   function parseTime(timestamp?: string): number {
-    if (!timestamp) return defaultTime;
+    if (!timestamp) return fallbackTime;
     const parsed = Date.parse(timestamp);
-    return isNaN(parsed) ? defaultTime : parsed;
+    return isNaN(parsed) ? fallbackTime : parsed;
   }
 
   function emit(type: string, data: Record<string, unknown>, time: number, surfaceOp?: 'append'): void {
@@ -61,6 +63,13 @@ export function convertSessionToDshEvents(
     if (!stepOpen) {
       emit('step/start', { turn: turnNum, step: stepNum }, time);
       stepOpen = true;
+      if (!hasSystemHead) {
+        emit('system/message', {
+          turn: turnNum, step: stepNum,
+          message: { id: `system-${session.ref.id}`, role: 'system', source: { kind: 'system-prompt' }, content: [] },
+        }, time, 'append');
+        hasSystemHead = true;
+      }
     }
   }
 
@@ -90,7 +99,7 @@ export function convertSessionToDshEvents(
         messageSeqs: [],
         source: { kind: 'user' },
       },
-      defaultTime
+      fallbackTime
     );
   }
 
@@ -139,6 +148,7 @@ export function convertSessionToDshEvents(
                 source: { kind: 'model', provider: providerName, model: modelName },
               },
               stream: [
+                { type: 'chunk', time: eventTime, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
                 {
                   type: 'chunk',
                   time: eventTime,
@@ -148,6 +158,7 @@ export function convertSessionToDshEvents(
                     text: thinkingText,
                   },
                 },
+                { type: 'chunk', time: eventTime, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: thinkingText } } },
               ],
             },
             eventTime,
@@ -157,61 +168,25 @@ export function convertSessionToDshEvents(
         break;
       }
 
-      case 'tool_call': {
-        ensureStepStart(currentTurn, currentStep, eventTime);
-        const callId = turnEvent.id;
-        const toolName = turnEvent.toolName ?? 'tool';
-        const toolArgsStr = typeof turnEvent.toolArgs === 'string'
-          ? turnEvent.toolArgs
-          : JSON.stringify(turnEvent.toolArgs ?? {});
-
-        emit(
-          'tool/call',
-          {
-            turn: currentTurn,
-            step: currentStep,
-            callId,
-            name: toolName,
-            arguments: toolArgsStr,
-          },
-          eventTime
-        );
-        break;
-      }
-
+      case 'tool_call':
       case 'tool_result': {
         ensureStepStart(currentTurn, currentStep, eventTime);
-        const callId = turnEvent.id;
-        const toolName = turnEvent.toolName ?? 'tool';
-        const resultContent = turnEvent.toolResult ?? '';
-
-        emit(
-          'tool/result',
-          {
-            turn: currentTurn,
-            step: currentStep,
-            message: {
-              id: `tool-res-${callId}`,
-              role: 'user',
-              source: { kind: 'tool', callId, tool: toolName },
-              content: [
-                {
-                  type: 'tool-result',
-                  toolCallId: callId,
-                  content: [{ type: 'text', text: resultContent }],
-                  ...(turnEvent.isError ? { isError: true } : {}),
-                },
-              ],
-            },
-            ...(turnEvent.exitCode !== undefined ? { meta: { exitCode: turnEvent.exitCode } } : {}),
-          },
-          eventTime,
-          'append'
-        );
-
-        // Tool execution concludes a step; next action starts a new step
-        closeStep(currentTurn, currentStep, eventTime);
-        currentStep++;
+        const label = turnEvent.kind === 'tool_call' ? 'External tool call' : 'External tool result';
+        const name = turnEvent.toolName ?? 'tool';
+        const detail = turnEvent.kind === 'tool_call' ? JSON.stringify(turnEvent.toolArgs ?? {}) : turnEvent.toolResult ?? '';
+        const status = `${turnEvent.isError ? ' · error' : ''}${turnEvent.exitCode !== undefined ? ` · exit ${turnEvent.exitCode}` : ''}`;
+        const text = `[${label} · ${name}${status}]\n${detail}`;
+        // Normalized providers do not preserve reliable call/result identities.
+        // External activity remains read-only transcript, as in live ACP output.
+        emit('assistant/message', {
+          turn: currentTurn, step: currentStep,
+          message: { id: `external-${i}-${turnEvent.id}`, role: 'assistant', source: { kind: 'model', provider: providerName, model: modelName }, content: [{ type: 'reasoning', text }] },
+          stream: [
+            { type: 'chunk', time: eventTime, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+            { type: 'reasoning-chunks', time0: eventTime, index: 0, dt: [], texts: [text] },
+            { type: 'chunk', time: eventTime, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text } } },
+          ],
+        }, eventTime, 'append');
         break;
       }
 
@@ -231,6 +206,7 @@ export function convertSessionToDshEvents(
               source: { kind: 'model', provider: providerName, model: modelName },
             },
             stream: [
+              { type: 'chunk', time: eventTime, chunk: { type: 'block-start', index: 0, blockType: 'text' } },
               {
                 type: 'chunk',
                 time: eventTime,
@@ -240,6 +216,7 @@ export function convertSessionToDshEvents(
                   text,
                 },
               },
+              { type: 'chunk', time: eventTime, chunk: { type: 'block-end', index: 0, block: { type: 'text', text } } },
             ],
           },
           eventTime,
@@ -259,8 +236,8 @@ export function convertSessionToDshEvents(
 
   // Final cleanup if the last turn was still open
   if (turnOpen) {
-    const lastTime = events.length > 0 ? events[events.length - 1]!.time : defaultTime;
-    closeTurn(currentTurn, lastTime);
+    const lastTime = events.length > 0 ? events[events.length - 1]!.time : fallbackTime;
+    closeTurn(currentTurn, lastTime, 'interrupted');
   }
 
   return events;

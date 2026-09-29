@@ -86,23 +86,19 @@ test('convertSessionToDshEvents converts synthetic NormalizedSession into valid 
   assert.equal((userMsg.data.content as any)[0].text, 'Hello world, please check the status');
 
   // Verify thinking (assistant/message with stream reasoning-delta)
-  const thinkingMsg = dshEvents.find((e) => e.type === 'assistant/message' && (e.data.stream as any)?.[0]?.chunk?.type === 'reasoning-delta');
+  const thinkingMsg = dshEvents.find((e) => e.type === 'assistant/message' && (e.data.stream as any)?.some((r: any) => r.chunk?.type === 'reasoning-delta'));
   assert(thinkingMsg, 'Must emit reasoning chunks for thinking');
   assert.equal(thinkingMsg.surfaceOp, 'append');
-  assert.equal((thinkingMsg.data.stream as any)[0].chunk.text, 'Thinking about checking git status...');
+  assert.equal((thinkingMsg.data.stream as any)[1].chunk.text, 'Thinking about checking git status...');
 
-  // Verify tool/call and tool/result
-  const toolCall = dshEvents.find((e) => e.type === 'tool/call');
-  assert(toolCall, 'Must emit tool/call');
-  assert.equal(toolCall.data.name, 'run_command');
-
-  const toolResult = dshEvents.find((e) => e.type === 'tool/result');
-  assert(toolResult, 'Must emit tool/result');
-  assert.equal(toolResult.surfaceOp, 'append');
-  assert.equal((toolResult.data.meta as any)?.exitCode, 0);
+  // External tool history is visible text; it cannot start a DSH tool lifecycle.
+  const external = dshEvents.filter(e => e.type === 'assistant/message').flatMap(e => (e.data.message as any).content).map(b => b.text);
+  assert(external.some(text => text.includes('[External tool call · run_command]')));
+  assert(external.some(text => text.includes('[External tool result · run_command · exit 0]')));
+  assert(!dshEvents.some(e => e.type === 'tool/call' || e.type === 'tool/result'));
 
   // Verify final assistant/message
-  const assistantMsg = dshEvents.find((e) => e.type === 'assistant/message' && (e.data.stream as any)?.[0]?.chunk?.type === 'text-delta');
+  const assistantMsg = dshEvents.find((e) => e.type === 'assistant/message' && (e.data.stream as any)?.some((r: any) => r.chunk?.type === 'text-delta'));
   assert(assistantMsg, 'Must emit assistant message');
   assert.equal(assistantMsg.surfaceOp, 'append');
 
@@ -134,82 +130,11 @@ test('convertSessionToDshEvents converts real sessions on this machine', async (
   }
 });
 
-test('session_open_in_dsh and session_search link with session PWD and workspaceRegistry', async () => {
-  const { apply } = await import('../src/dsh/plugin.js');
-
-  const registeredTools = new Map<string, any>();
-  const mockTools = {
-    register: (tool: any) => {
-      registeredTools.set(tool.name, tool);
-    },
-  };
-
-  const attachedSessions: { workspacePath: string; sessionId: string }[] = [];
-  const mockWorkspace = {
-    id: 'ws-1',
-    path: process.cwd(),
-    attachSession: async (sessionId: string) => {
-      attachedSessions.push({ workspacePath: process.cwd(), sessionId });
-    },
-  };
-
-  const mockWorkspaceRegistry = {
-    create: async (cwd: string) => {
-      return {
-        ...mockWorkspace,
-        path: cwd,
-        attachSession: async (sessionId: string) => {
-          attachedSessions.push({ workspacePath: cwd, sessionId });
-        },
-      };
-    },
-  };
-
-  const createdSessions: any[] = [];
-  const mockSessions = {
-    get: () => undefined,
-    create: (id: string, opts: any) => {
-      createdSessions.push({ id, opts });
-    },
-  };
-
-  const mockCtx = {
-    tools: mockTools,
-    get: (key: string) => {
-      if (key === 'workspaceRegistry') return mockWorkspaceRegistry;
-      if (key === 'sessions') return mockSessions;
-      return undefined;
-    },
-  };
-
-  apply(mockCtx);
-
-  const searchTool = registeredTools.get('session_search');
-  assert(searchTool, 'session_search must be registered');
-
-  const openTool = registeredTools.get('session_open_in_dsh');
-  assert(openTool, 'session_open_in_dsh must be registered');
-
-  // Test session_open_in_dsh with an existing session ref
-  const recent = await listRecentSessions({ limit: 1 });
-  if (recent.length > 0) {
-    const targetSessionId = recent[0]!.id;
-    const res = await openTool.execute(
-      { sessionId: targetSessionId },
-      { agent: { session: { header: { cwd: process.cwd() } } } },
-    );
-
-    assert(res.success, 'openTool should succeed');
-    assert(res.dshSessionId, 'should return dshSessionId');
-    assert(attachedSessions.length > 0, 'Must have attached session to workspaceRegistry');
-    assert.equal(attachedSessions[attachedSessions.length - 1]!.sessionId, res.dshSessionId);
-  }
-});
-
 test('plugin GET /sessions returns index metadata only; GET /session/:id loads one session without dshEvents', async (t) => {
   const { apply } = await import('../src/dsh/plugin.js');
   let handler: ((req: any, res: any) => Promise<void>) | undefined;
   apply({
+    effect: (setup: () => unknown) => setup(),
     webServer: {
       register: (route: any) => {
         handler = route.handler;
@@ -296,7 +221,16 @@ test('DSH browser client bundle registers with ModuleLoader exactly once and exp
 
   assert.equal(loadCallCount, 1, 'Materialization must NOT call load a second time (no duplicate registration)');
   assert.equal(typeof materialized.apply, 'function', 'Materialized exports must have apply function');
-  assert.deepEqual(materialized.inject, ['sessions', 'workspaces'], 'Materialized exports must declare inject');
+  assert.deepEqual(materialized.inject, ['sessions', 'workspaces', 'uiWorkspace', 'locale'], 'Materialized exports must declare inject');
 });
 
 
+
+test('import history preserves ordered tool records and closes an unfinished tail without fabricating an answer', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const history: NormalizedSession = JSON.parse(await readFile(new URL('./fixtures/dsh-import/history.json', import.meta.url), 'utf8'));
+  const expected = JSON.parse(await readFile(new URL('./fixtures/dsh-import/events.json', import.meta.url), 'utf8'));
+  assert.deepEqual(convertSessionToDshEvents(history), expected);
+  const invalidDate = convertSessionToDshEvents({ ...history, ref: { ...history.ref, createdAt: 'invalid' } });
+  assert.ok(invalidDate.every(event => Number.isFinite(event.time)));
+});

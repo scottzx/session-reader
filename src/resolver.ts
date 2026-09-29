@@ -186,12 +186,13 @@ export async function findResolvedByWorkspace(
 }
 
 /** Locates a session by full id, id prefix, or native file path. */
-export async function resolveSession(sessionId: string): Promise<ResolvedSession | undefined> {
+export async function resolveSession(sessionId: string, provider?: AgentProvider): Promise<ResolvedSession | undefined> {
   const asPath = sessionId.includes('/') ? canonicalizePath(sessionId) : undefined;
   const needle = sessionId.toLowerCase();
   let prefixHit: { adapter: ProviderAdapter; candidate: SessionCandidate } | undefined;
 
   for (const adapter of adapters) {
+    if (provider && adapter.provider !== provider) continue;
     for (const candidate of await adapter.listCandidates()) {
       if (asPath ? candidate.path === asPath : candidate.id.toLowerCase() === needle) {
         return { ref: await adapter.scanRef(candidate), adapter, candidate };

@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import fs from 'node:fs';
 import {
   resolveSession,
   searchSessions,
@@ -9,16 +8,17 @@ import {
   eventDetails,
 } from '../index.js';
 import { handleSessionApi } from '../web/api.js';
-import { convertSessionToDshEvents } from './adapter.js';
+import { openSessionInDsh, continuationAvailability } from './open.js';
+import type { AgentProvider } from '../types.js';
 
 export const name = 'session-reader';
-export const inject = ['tools', 'webServer'];
+export const inject = { tools: { required: true }, webServer: { required: true }, sessionController: { required: true }, workspaceRegistry: { required: true }, oneagentsAcpSessions: { required: false } };
 
 export function apply(ctx: any) {
   // 1. Register tools if ctx.tools is present
   if (ctx.tools && typeof ctx.tools.register === 'function') {
     // session_search
-    ctx.tools.register({
+    ctx.effect(() => ctx.tools.register({
       name: 'session_search',
       description: 'Search past AI coding sessions across Claude Code, Codex, Antigravity, Grok and DSH. By default searches sessions in the current working directory / workspace.',
       parameters: {
@@ -67,10 +67,10 @@ export function apply(ctx: any) {
           })),
         }));
       },
-    });
+    }));
 
     // session_overview
-    ctx.tools.register({
+    ctx.effect(() => ctx.tools.register({
       name: 'session_overview',
       description: 'Get statistics, files modified, commands executed, and end-state facts of a past session.',
       parameters: {
@@ -94,10 +94,10 @@ export function apply(ctx: any) {
           stats: overview.stats,
         };
       },
-    });
+    }));
 
     // session_turns
-    ctx.tools.register({
+    ctx.effect(() => ctx.tools.register({
       name: 'session_turns',
       description: 'Get turn-by-turn summary of what was discussed and done in a session.',
       parameters: {
@@ -113,10 +113,10 @@ export function apply(ctx: any) {
         const normalized = await resolved.adapter.parse(resolved.candidate);
         return summarizeTurns(normalized);
       },
-    });
+    }));
 
     // session_turn_detail
-    ctx.tools.register({
+    ctx.effect(() => ctx.tools.register({
       name: 'session_turn_detail',
       description: 'Inspect full untruncated events, tool calls, and results for a specific turn in a session.',
       parameters: {
@@ -137,116 +137,29 @@ export function apply(ctx: any) {
         }
         return turnDetail(normalized, args.turn);
       },
-    });
+    }));
 
     // session_open_in_dsh
-    ctx.tools.register({
+    ctx.effect(() => ctx.tools.register({
       name: 'session_open_in_dsh',
-      description: 'Load a cross-agent historical session into DSH native sessions and automatically assign it to the DSH workspace.',
+      description: 'Open a historical session in DSH and continue with its original Agent. External sessions require the ACP plugin; unsupported sources remain read-only.',
       parameters: {
-        sessionId: { type: 'string', required: true, description: 'Session ID to import into DSH' },
-        currentCwd: { type: 'string', description: 'Optional current session working directory fallback' },
+        sessionId: { type: 'string', required: true, description: 'Session ID, prefix, or native transcript path' },
+        provider: { type: 'string', description: 'Source provider to disambiguate an ID: claude, codex, grok, dsh, or antigravity' },
       },
       output: {
         schema: { type: 'object' },
         render: (_args: any, value: any) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
       },
-      async execute(args: any, exec?: any) {
-        const resolved = await resolveSession(args.sessionId);
-        if (!resolved) throw new Error(`Session not found: ${args.sessionId}`);
-        const normalized = await resolved.adapter.parse(resolved.candidate);
-        const dshEvents = convertSessionToDshEvents(normalized);
-        const rawId = normalized.ref.id;
-        const sanitizedId = rawId.replace(/[^a-zA-Z0-9_-]/g, '-');
-        const dshSessionId = sanitizedId.startsWith('session-') ? sanitizedId : `session-${sanitizedId}`;
-
-        const currentSessionCwd = exec?.agent?.session?.header?.cwd ?? args.currentCwd;
-        let targetCwd: string | undefined;
-        if (normalized.ref.workspace && typeof normalized.ref.workspace === 'string' && normalized.ref.workspace.startsWith('/')) {
-          try {
-            const st = await fs.promises.stat(normalized.ref.workspace);
-            if (st.isDirectory()) {
-              targetCwd = await fs.promises.realpath(normalized.ref.workspace);
-            }
-          } catch {}
-        }
-        if (!targetCwd) {
-          const fallback = currentSessionCwd || process.cwd();
-          try {
-            const st = await fs.promises.stat(fallback);
-            if (st.isDirectory()) {
-              targetCwd = await fs.promises.realpath(fallback);
-            }
-          } catch {}
-        }
-        if (!targetCwd) targetCwd = process.cwd();
-
-        const createdAt = normalized.ref.createdAt ? Date.parse(normalized.ref.createdAt) : Date.now();
-
-        const header: any = {
-          version: 2,
-          id: dshSessionId,
-          cwd: targetCwd,
-          createdAt: isNaN(createdAt) ? Date.now() : createdAt,
-          isSeeded: false,
-          delegationDepth: 0,
-        };
-
-        const persistence = ctx.get ? ctx.get('sessionPersistence') : ctx.sessionPersistence;
-        if (persistence && typeof persistence.create === 'function') {
-          try {
-            const existingStat = await persistence.stat(dshSessionId);
-            if (!existingStat) {
-              const handle = await persistence.create(header);
-              await handle.append(dshEvents);
-              await handle.flush();
-              await handle.close();
-            }
-          } catch (e: any) {
-            console.warn('[session-reader] persistence notice:', e?.message || e);
-          }
-        }
-
-        const sessions = ctx.get ? ctx.get('sessions') : ctx.sessions;
-        if (sessions && typeof sessions.create === 'function') {
-          try {
-            if (!sessions.get(dshSessionId)) {
-              sessions.create(dshSessionId, { seed: dshEvents, meta: header });
-            }
-          } catch (e: any) {
-            console.warn('[session-reader] sessions.create notice:', e?.message || e);
-          }
-        }
-
-        const workspaceRegistry = ctx.get ? (ctx.get('workspaceRegistry') ?? ctx.workspaceRegistry) : ctx.workspaceRegistry;
-        let attachedWorkspaceId: string | undefined;
-        if (workspaceRegistry && typeof workspaceRegistry.create === 'function') {
-          try {
-            const ws = await workspaceRegistry.create(targetCwd);
-            if (ws && typeof ws.attachSession === 'function') {
-              await ws.attachSession(dshSessionId);
-              attachedWorkspaceId = ws.id;
-            }
-          } catch (wsErr: any) {
-            console.warn('[session-reader] workspace attach notice:', wsErr?.message || wsErr);
-          }
-        }
-
-        return {
-          success: true,
-          dshSessionId,
-          eventCount: dshEvents.length,
-          title: normalized.ref.title,
-          workspace: targetCwd,
-          workspaceId: attachedWorkspaceId,
-        };
+      async execute(args: any) {
+        return openSessionInDsh(ctx, { sessionId: args.sessionId, provider: args.provider });
       },
-    });
+    }));
   }
 
   // 2. Register HTTP routes if ctx.webServer is present
   if (ctx.webServer && typeof ctx.webServer.register === 'function') {
-    ctx.webServer.register({
+    ctx.effect(() => ctx.webServer.register({
       kind: 'prefix',
       path: '/api/session-reader',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -265,125 +178,24 @@ export function apply(ctx: any) {
         }
 
         try {
+          if (pathname === '/continuation') {
+            const provider = url.searchParams.get('provider') as AgentProvider | null;
+            if (!provider) throw new Error('Missing provider');
+            res.end(JSON.stringify(await continuationAvailability(ctx, { provider })));
+            return;
+          }
           if (pathname === '/open-in-dsh') {
-            let sessionId = url.searchParams.get('id');
-            let currentCwd = url.searchParams.get('currentCwd') ?? undefined;
-            if (!sessionId && (req.method === 'POST' || req.method === 'PUT')) {
-              const body = await new Promise<any>((resolve) => {
-                let data = '';
-                req.on('data', chunk => data += chunk);
-                req.on('end', () => {
-                  try { resolve(JSON.parse(data)); } catch { resolve({}); }
-                });
-                req.on('error', () => resolve({}));
-              });
-              sessionId = body?.sessionId || body?.id;
-              currentCwd = body?.currentCwd || currentCwd;
+            if (req.method !== 'POST') { res.statusCode = 405; res.end(JSON.stringify({ error: 'Use POST to open a session' })); return; }
+            if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) {
+              res.statusCode = 403; res.end(JSON.stringify({ error: 'Cross-origin session imports are not allowed' })); return;
             }
-            if (!sessionId) {
-              res.statusCode = 400;
-              res.end(JSON.stringify({ error: 'Missing sessionId' }));
-              return;
+            let body = '';
+            for await (const chunk of req) { body += String(chunk); if (body.length > 16384) throw new Error('Request body too large'); }
+            const value = JSON.parse(body);
+            if (typeof value.sessionId !== 'string' || !value.sessionId || (value.provider !== undefined && typeof value.provider !== 'string')) {
+              res.statusCode = 400; res.end(JSON.stringify({ error: 'sessionId and optional provider must be strings' })); return;
             }
-            const resolved = await resolveSession(sessionId);
-            if (!resolved) {
-              res.statusCode = 404;
-              res.end(JSON.stringify({ error: `Session not found: ${sessionId}` }));
-              return;
-            }
-            const normalized = await resolved.adapter.parse(resolved.candidate);
-            const dshEvents = convertSessionToDshEvents(normalized);
-
-            const rawId = normalized.ref.id;
-            const sanitizedId = rawId.replace(/[^a-zA-Z0-9_-]/g, '-');
-            const dshSessionId = sanitizedId.startsWith('session-') ? sanitizedId : `session-${sanitizedId}`;
-
-            let targetCwd: string | undefined;
-            if (normalized.ref.workspace && typeof normalized.ref.workspace === 'string' && normalized.ref.workspace.startsWith('/')) {
-              try {
-                const st = await fs.promises.stat(normalized.ref.workspace);
-                if (st.isDirectory()) {
-                  targetCwd = await fs.promises.realpath(normalized.ref.workspace);
-                }
-              } catch {}
-            }
-            if (!targetCwd) {
-              const fallback = currentCwd || process.cwd();
-              try {
-                const st = await fs.promises.stat(fallback);
-                if (st.isDirectory()) {
-                  targetCwd = await fs.promises.realpath(fallback);
-                }
-              } catch {}
-            }
-            if (!targetCwd) targetCwd = process.cwd();
-
-            const createdAt = normalized.ref.createdAt ? Date.parse(normalized.ref.createdAt) : Date.now();
-
-            const header: any = {
-              version: 2,
-              id: dshSessionId,
-              cwd: targetCwd,
-              createdAt: isNaN(createdAt) ? Date.now() : createdAt,
-              isSeeded: false,
-              delegationDepth: 0,
-            };
-
-            // 1. Persistence if available
-            const persistence = ctx.get ? ctx.get('sessionPersistence') : ctx.sessionPersistence;
-            if (persistence && typeof persistence.create === 'function') {
-              try {
-                const existingStat = await persistence.stat(dshSessionId);
-                if (!existingStat) {
-                  const handle = await persistence.create(header);
-                  await handle.append(dshEvents);
-                  await handle.flush();
-                  await handle.close();
-                }
-              } catch (persistErr: any) {
-                console.warn('[session-reader] persistence notice:', persistErr?.message || persistErr);
-              }
-            }
-
-            // 2. In-memory sessions if available
-            const sessions = ctx.get ? ctx.get('sessions') : ctx.sessions;
-            if (sessions && typeof sessions.create === 'function') {
-              try {
-                if (!sessions.get(dshSessionId)) {
-                  sessions.create(dshSessionId, {
-                    seed: dshEvents,
-                    meta: header,
-                  });
-                }
-              } catch (sessionErr: any) {
-                console.warn('[session-reader] sessions.create notice:', sessionErr?.message || sessionErr);
-              }
-            }
-
-            // 3. Workspace attachment if workspaceRegistry is available
-            const workspaceRegistry = ctx.get ? (ctx.get('workspaceRegistry') ?? ctx.workspaceRegistry) : ctx.workspaceRegistry;
-            let attachedWorkspaceId: string | undefined;
-            if (workspaceRegistry && typeof workspaceRegistry.create === 'function') {
-              try {
-                const ws = await workspaceRegistry.create(targetCwd);
-                if (ws && typeof ws.attachSession === 'function') {
-                  await ws.attachSession(dshSessionId);
-                  attachedWorkspaceId = ws.id;
-                }
-              } catch (wsErr: any) {
-                console.warn('[session-reader] workspace attach notice:', wsErr?.message || wsErr);
-              }
-            }
-
-            res.statusCode = 200;
-            res.end(JSON.stringify({
-              success: true,
-              dshSessionId,
-              eventCount: dshEvents.length,
-              title: normalized.ref.title,
-              workspace: targetCwd,
-              workspaceId: attachedWorkspaceId,
-            }));
+            res.end(JSON.stringify(await openSessionInDsh(ctx, { sessionId: value.sessionId, provider: value.provider })));
             return;
           }
 
@@ -397,6 +209,6 @@ export function apply(ctx: any) {
           res.end(JSON.stringify({ error: err?.message ?? String(err) }));
         }
       },
-    });
+    }));
   }
 }

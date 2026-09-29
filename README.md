@@ -475,7 +475,25 @@ $ 1session graph ca8325e1
 
 ## DSH 插件入口
 
+从 npm 安装到 DSH Web profile（包内声明了 `dsh.bundle.patch`，安装后自动启用）：
+
+```sh
+pnpm dsh plugin --profile web add @1agents/session-reader @1agents/dsh-acp
+```
+
+只查看历史时可只安装 `@1agents/session-reader`。已安装独立 `dsh` 命令时省略开头的 `pnpm`；桌面版将 profile 改为 `desktop`。更新包后重启对应的 DSH 服务。原会话续聊还需单独启动 `@1agents/acp-service@^0.2.0`，具体配置见 [ACP 插件说明](https://github.com/scottzx/1acp/tree/main/packages/dsh-plugin)。
+
 DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。入口沿用「插件」「自动化任务」的主文字色、字号、行高、圆角、悬停与键盘焦点样式；展开时使用 16px 图标，折叠时使用 18px 图标和 36px 按钮，颜色跟随 DSH 的亮暗主题。
+
+### 在 DSH 中继续原会话
+
+安装并启用 `@1agents/dsh-acp`，启动其配置的 acp-service 后，Claude、Codex、Grok 的历史详情提供「在 DSH 中继续原会话」。session-reader 读取历史并调用 ACP 插件的 `oneagentsAcpSessions` 服务；1acp 恢复原 Agent 的原生会话，后续输入继续发给它。原工作目录必须存在；不会改用当前目录或新建空会话。DSH 来源直接打开原有 DSH 会话，不复制或重写日志。
+
+ACP 未安装、Agent 未就绪或来源不支持时，历史仍可只读查看。导入、鉴权和恢复失败会显示原因并保留预览。重复导入打开同一个 DSH 会话；导入历史是一次性快照，不持续同步其他客户端新增的消息。旧版导入产生的历史副本不会自动改绑。外部工具调用与结果保留为只读历史记录，不触发 DSH 工具执行。
+
+`session_open_in_dsh` 和 `POST /api/session-reader/open-in-dsh` 共用同一入口，接受 `sessionId`（ID、前缀或原始文件路径）和可选的 `provider`；provider 用于区分不同来源的同名 ID。外部成功结果包含 `dshSessionId`、`workspace`、`workspaceId`、`agent` 与 `continuation: "native"`，DSH 来源返回 `continuation: "dsh"`。`GET /api/session-reader/continuation?provider=codex` 返回续聊可用性及不可用原因。独立 CLI、解析库与历史搜索不需要安装 ACP 插件。
+
+验证当前 DSH 事件兼容性：先运行 `npm run build`，再运行 `node scripts/check-dsh-import.mjs /absolute/path/DSH`（DSH checkout 须已构建）。`test/fixtures/dsh-import/` 保存用户消息、思考、工具调用与结果，以及未完成尾部的固定历史快照。
 
 ## `1session web`：独立浏览器
 
