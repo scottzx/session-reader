@@ -14,7 +14,7 @@ normalizes all of them and answers questions about what actually happened.
 | `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | same, plus structured `exit_code` / `stderr` / `pid` |
 | `antigravity` | `~/.gemini/antigravity/brain/<uuid>/.../transcript.jsonl` | same, plus plan/walkthrough artifacts |
 | `grok` | `~/.grok/sessions/<encoded cwd>/<uuid>/chat_history.jsonl` | same, plus tool durations/outcomes, background-task receipts, goal plans |
-| `dsh` | `~/.dsh/sessions/<slug>/session-<uuid>/session.v2.jsonl.zstd` | same, plus native turn/step boundaries and per-message usage |
+| `dsh` | `~/.dsh/sessions/<slug>/session-<uuid>/session.v{2,4}.jsonl[.zstd]` | same, plus native turn/step boundaries and per-message usage |
 
 Everything is derived from the raw files at read time. Nothing is written back to
 them, no daemon is involved, and no session is ever resumed or modified.
@@ -89,8 +89,8 @@ line at a time, so you find the moment by scanning: an order of magnitude faster
 for "where in here did that happen".
 
 `<session-id>` accepts a full id, a prefix of 6+ characters, or a raw file path.
-Session ids shown by `list` and `search` are 8-char prefixes — pass them straight
-back in.
+Prefer the canonical `provider:full-native-id` returned in JSON or read commands.
+Prefixes are accepted only when unambiguous; never choose the first collision.
 
 **Where sessions are not the best source.** When the question is about changes
 that actually landed in a repo — a changelog, "what shipped", who touched a file
@@ -141,7 +141,8 @@ Each rung narrows the evidence, so climb only as far as the question needs.
 1session turn 3ab9fe0e 9 --event 491-493     # …with its result and the verdict
 ```
 
-Every `search` hit is prefixed with the handle that drills into it, and each
+Event hits carry a turn/event handle and a stable `locator`; metadata and artifact
+hits belong to the session level. Each
 session prints the command ready to paste:
 
 ```text
@@ -153,6 +154,28 @@ session prints the command ready to paste:
 Reading one tool call usually means reading three events — the call, its result,
 and what the agent concluded — so `--event` takes `491-493` and `491,495,502` as
 well as a single number.
+
+Default search covers user/assistant dialogue and existing provider titles/summaries.
+Use `--area tools` for tool names, arguments and results, `--area artifacts` for
+registered artifact text, or `--area all` for both. Thinking remains excluded unless
+explicitly requested with `--kind thinking`. Queries are literal strings by default;
+use `--terms '["term1","term2"]' --operator and|or` for multiple terms.
+
+Prefer one read of the exact match:
+
+```bash
+1session turn 'claude:<full-id>' --locator '<event:reference>' --json
+1session turn 'claude:<full-id>' --call '<native-call-id>' --json
+1session turn 'claude:<full-id>' 2-4 --json
+```
+
+A default turn read returns all visible user/assistant text and a tool directory,
+without reasoning or tool payloads. `--call` reads arguments plus all results paired
+by native call ID. Missing IDs are `unconfirmed`, never paired by adjacency.
+Long reads return `nextCursor`; repeat the same selector with `--cursor` until it
+is absent. The default page is 32,000 characters, configurable with `--max-chars`.
+Use `--raw` with `--event` or `--locator` only when the original JSONL record is
+needed, including instruction envelopes omitted by the dialogue view.
 
 `search` hides the invocation you are running right now (and what it printed)
 from its own results, since a live session is indexed as it happens and would
@@ -188,7 +211,7 @@ say so explicitly instead of guessing. **That interpretation is your job**, and
 you should keep the two layers visibly separate when you answer.
 
 Every fact carries an evidence handle like `E221 · T9` (event 221, turn 9), and
-so does every search hit — `T9 · E221`, in the order `turn <id> 9 --event 221`
+so does every event search hit — `T9 · E221`, in the order `turn <id> 9 --event 221`
 wants it. When
 you assert something happened, carry the handle or the session id into your
 answer so the user can verify it with one command. A claim about the past that

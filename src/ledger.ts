@@ -1,3 +1,4 @@
+import { toolResults } from './calls.js';
 import path from 'node:path';
 import { isInside } from './util/paths.js';
 import { oneLine } from './util/text.js';
@@ -33,10 +34,10 @@ export function commandLedger(session: NormalizedSession): CommandRecord[] {
   const toTurn = turnOf(session);
 
   if (session.stats.commands.length) {
-    // Codex keeps its own ledger; align it with the event stream by order.
-    const callIndexes = session.turns.filter((event) => rawCommand(event)).map((event) => event.index);
-    return session.stats.commands.map((record, i) => {
-      const eventIndex = callIndexes[i] ?? -1;
+    // Only a unique matching command provides an unambiguous event anchor.
+    return session.stats.commands.map((record) => {
+      const candidates = session.turns.filter((event) => rawCommand(event)?.trim() === record.command.trim());
+      const eventIndex = candidates.length === 1 ? candidates[0]!.index : -1;
       return { ...record, eventIndex, turn: eventIndex >= 0 ? toTurn(eventIndex) : 0 };
     });
   }
@@ -45,17 +46,15 @@ export function commandLedger(session: NormalizedSession): CommandRecord[] {
   for (const event of session.turns) {
     const command = rawCommand(event);
     if (!command) continue;
-    // The next tool_result is this command's outcome.
-    const result = session.turns
-      .slice(event.index + 1, event.index + 4)
-      .find((candidate) => candidate.kind === 'tool_result');
+    const results = toolResults(session.turns, event);
+    const result = [...results].reverse().find((item) => item.isError || (item.exitCode ?? 0) !== 0) ?? results.at(-1);
     const host = SSH_HOST.exec(command)?.[1];
     records.push({
       eventIndex: event.index,
       turn: toTurn(event.index),
       command: oneLine(command, 300),
       provenance: 'derived',
-      extractor: 'pair:tool_call+tool_result',
+      extractor: event.callId ? 'pair:call_id' : 'call:unconfirmed',
       ...(host ? { host } : {}),
       ...(event.timestamp ? { timestamp: event.timestamp } : {}),
       // An explicit status wins; otherwise "provider did not flag an error"

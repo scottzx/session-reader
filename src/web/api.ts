@@ -1,3 +1,5 @@
+import { readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../reader.js';
+import { callsIn } from '../calls.js';
 import type { ServerResponse } from 'node:http';
 import {
   buildOverview,
@@ -30,37 +32,22 @@ export function resolveListWorkspace(
 export function previewTurns(normalized: NormalizedSession) {
   return summarizeTurns(normalized).map((ts) => {
     const evs = (normalized.turns || []).slice(ts.events[0], ts.events[1] + 1);
-    const thinkingEvents = evs.filter((e) => e.kind === 'thinking');
     const assistantEvents = evs.filter((e) => e.kind === 'assistant');
-
-    const toolCalls: any[] = [];
-    for (let i = 0; i < evs.length; i++) {
-      const e = evs[i]!;
-      if (e.kind === 'tool_call') {
-        const result = evs.slice(i + 1).find(
-          (r) => r.kind === 'tool_result' && (r.toolName === e.toolName || !r.toolName),
-        );
-        toolCalls.push({
-          id: e.id,
-          toolName: e.toolName,
-          args: e.toolArgs,
-          result: result?.toolResult,
-          exitCode: result?.exitCode,
-          isError: result?.isError,
-        });
-      }
-    }
+    const messages = evs.filter((e) => e.kind === 'user' || e.kind === 'assistant');
+    const userPrompt = messages.filter((e) => e.kind === 'user').map((e) => e.fullText ?? e.text).filter(Boolean).join('\n\n');
+    const toolCalls = callsIn(evs);
 
     return {
       no: ts.no,
       turn: ts.no,
       status: ts.status,
       prompt: ts.prompt,
-      userPrompt: ts.prompt,
+      userPrompt,
+      messages,
       outcome: ts.outcome,
-      assistantReply: assistantEvents.map((a) => a.text).filter(Boolean).join('\n\n') || ts.outcome,
-      thinking: thinkingEvents.map((t) => t.text).filter(Boolean).join('\n\n'),
-      thinkingBlocks: thinkingEvents.map((t) => t.text).filter(Boolean) as string[],
+      assistantReply: assistantEvents.map((a) => a.fullText ?? a.text).filter(Boolean).join('\n\n') || ts.outcome,
+      thinking: '',
+      thinkingBlocks: [],
       toolCalls,
       files: ts.files,
       commands: ts.commands,
@@ -147,8 +134,27 @@ export async function handleSessionApi(
       url.searchParams.get('workspace'),
       options.fallbackCwd,
     );
-    const hits = await searchSessions(query, { workspace, since, provider, limit });
+    const hits = await searchSessions(query, { workspace, since, provider, limit,
+      area: url.searchParams.get('area') as never || undefined, sessionId: url.searchParams.get('session') ?? undefined,
+      terms: url.searchParams.getAll('term').length ? url.searchParams.getAll('term') : undefined,
+      operator: url.searchParams.get('operator') as never || undefined, sort: url.searchParams.get('sort') as never || undefined,
+      cursor: url.searchParams.get('cursor') ?? undefined,
+    });
     sendJson(res, 200, { hits });
+    return true;
+  }
+
+  const matchContent = pathname.match(/^\/session\/([^/]+)\/content$/);
+  if (matchContent) {
+    const id = decodeURIComponent(matchContent[1]!);
+    const params = url.searchParams;
+    const opts = { cursor: params.get('cursor') ?? undefined, maxChars: params.has('maxChars') ? Number(params.get('maxChars')) : undefined };
+    if (params.get('raw') === 'true' && !params.has('event')) throw new Error('raw requires event');
+    const body = params.has('call') ? await readCall(id, params.get('call')!, opts)
+      : params.has('artifact') ? await readArtifact(id, params.get('artifact')!, opts)
+      : params.has('event') ? await (params.get('raw') === 'true' ? readOriginalRecords : readEvents)(id, params.getAll('event'), opts)
+      : await readTurns(id, params.get('turns') ?? '1', opts);
+    sendJson(res, 200, body);
     return true;
   }
 

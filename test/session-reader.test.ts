@@ -533,6 +533,7 @@ test('every search hit carries the turn that `turn --event` wants', async (t) =>
 
   const hits = await searchSessions('.', {
     regex: true,
+    kinds: ['user', 'assistant', 'tool_call', 'tool_result'],
     provider: ref.provider,
     limit: 5,
     maxPerSession: 5,

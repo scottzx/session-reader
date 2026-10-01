@@ -1,3 +1,4 @@
+import { sourceEvents, existingTitles } from './source.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,26 +16,30 @@ import {
 } from '../types.js';
 
 /** DeepSeek Harness keeps one directory per session under a slugified cwd. */
-const SESSIONS_DIR = path.join(os.homedir(), '.dsh', 'sessions');
 const SESSION_DIR = /^session-([0-9a-fA-F-]{36})$/;
-/** Written compressed; the plain spelling is read too, in case it ever is. */
-const TRANSCRIPTS = ['session.v2.jsonl', 'session.v2.jsonl.zstd'];
+const TRANSCRIPT = /^session\.v(\d+)\.jsonl(?:\.zstd)?$/;
+const SUPPORTED_VERSIONS = [2, 4];
 
 interface Block {
   type?: string;
+  toolCallId?: string;
   text?: string;
   isError?: boolean;
   content?: Block[];
 }
 
 interface Message {
+  id?: string;
   role?: string;
+  toolCallId?: string;
+  isError?: boolean;
   content?: Block[];
   source?: { kind?: string; provider?: string; model?: string };
 }
 
 interface Line {
   type?: string;
+  version?: number;
   seq?: number;
   /** Epoch milliseconds — every record but `session` carries one. */
   time?: number;
@@ -48,7 +53,13 @@ interface Line {
 }
 
 /** The harness appends the status of a failed shell command to its output. */
-const EXIT_CODE = /\[exit code:\s*(\d+)\]\s*$/i;
+const EXIT_CODE = /\[(?:exit code:\s*|Command finished with exit code\s+)(\d+)\]\s*$/i;
+
+function unsupportedVersion(file: string, version: number): Error {
+  const message = `unsupported DSH transcript v${version}: ${file}; supported versions: v2, v4`;
+  process.emitWarning(message, { code: 'SESSION_FORMAT_UNSUPPORTED' });
+  return new Error(message);
+}
 
 /** The harness injects catalogues and instructions as user messages. */
 function isRealUser(source: { kind?: string } | undefined): boolean {
@@ -78,19 +89,33 @@ function parseArguments(value: unknown): Record<string, unknown> | undefined {
 }
 
 /** Dispatches on the extension so both spellings read the same way. */
-function readLines(file: string, headBytes?: number): AsyncGenerator<Record<string, unknown>> {
-  if (file.endsWith('.zstd')) {
-    return readZstdJsonl(file, { ...(headBytes ? { headBytes } : {}) });
-  }
+async function* readLines(file: string, headBytes?: number): AsyncGenerator<Record<string, unknown>> {
   // A plain transcript is line-oriented, so a head read is a line budget.
-  return readJsonl(file, headBytes ? { maxLines: 200 } : {});
+  const lines = file.endsWith('.zstd')
+    ? readZstdJsonl(file, { ...(headBytes ? { headBytes } : {}) })
+    : readJsonl(file, headBytes ? { maxLines: 200 } : {});
+  for await (const line of lines) {
+    if (line.type === 'session' && typeof line.version === 'number' && !SUPPORTED_VERSIONS.includes(line.version)) {
+      throw unsupportedVersion(file, line.version);
+    }
+    yield line;
+  }
 }
 
-/** `sessions/<slugified cwd>/session-<uuid>/session.v2.jsonl[.zstd]`. */
-async function transcriptPath(dir: string): Promise<string | undefined> {
-  for (const name of TRANSCRIPTS) {
-    const full = path.join(dir, name);
-    if (await fs.stat(full).then((stat) => stat.isFile()).catch(() => false)) return full;
+/** Prefer the current format when a migration leaves an older transcript alongside it. */
+export async function dshTranscriptPath(dir: string): Promise<string | undefined> {
+  const files = (await fs.readdir(dir).catch(() => [] as string[]))
+    .filter((name) => TRANSCRIPT.test(name))
+    .sort((a, b) => Number(TRANSCRIPT.exec(b)![1]) - Number(TRANSCRIPT.exec(a)![1]) || a.localeCompare(b));
+  for (const name of files) {
+    const file = path.join(dir, name);
+    if (!(await fs.stat(file).then((stat) => stat.isFile()).catch(() => false))) continue;
+    const version = Number(TRANSCRIPT.exec(name)![1]);
+    if (!SUPPORTED_VERSIONS.includes(version)) {
+      unsupportedVersion(file, version);
+      return undefined;
+    }
+    return file;
   }
   return undefined;
 }
@@ -99,21 +124,22 @@ export const dshAdapter: ProviderAdapter = {
   provider: 'dsh',
 
   async listCandidates(): Promise<SessionCandidate[]> {
+    const sessionsDir = path.join(os.homedir(), '.dsh', 'sessions');
     let projects: string[];
     try {
-      projects = await fs.readdir(SESSIONS_DIR);
+      projects = await fs.readdir(sessionsDir);
     } catch {
       return [];
     }
     const found: SessionCandidate[] = [];
     for (const project of projects) {
-      const dir = path.join(SESSIONS_DIR, project);
+      const dir = path.join(sessionsDir, project);
       for (const entry of await fs.readdir(dir).catch(() => [] as string[])) {
         // The directory is `session-<uuid>`; the id is the uuid, so a short id
         // means the same thing here as it does for every other provider.
         const id = SESSION_DIR.exec(entry)?.[1];
         if (!id) continue;
-        const file = await transcriptPath(path.join(dir, entry));
+        const file = await dshTranscriptPath(path.join(dir, entry));
         if (!file) continue;
         const stat = await fs.stat(file).catch(() => undefined);
         if (!stat) continue;
@@ -161,21 +187,24 @@ export const dshAdapter: ProviderAdapter = {
 
   async parse(candidate: SessionCandidate): Promise<NormalizedSession> {
     const turns: TurnEvent[] = [];
+    const sources = sourceEvents('dsh', candidate.id);
     const stats = emptyProviderStats();
     const tokens: TokenUsage = { input: 0, output: 0, total: 0 };
     let cacheRead = 0;
     let title: string | undefined;
+    const titles: string[] = [];
     let firstPrompt: string | undefined;
     let workspace: string | undefined;
     let createdAt: string | undefined;
     let updatedAt: string | undefined;
+    let nativeTurnId: string | undefined;
 
     // An explicit `timestamp: undefined` is not the same object as one without
     // the key, and the index stores absent columns as absent — so a session read
     // back from it would stop deep-equalling a fresh parse.
     const push = ({ timestamp, ...turn }: Omit<TurnEvent, 'id' | 'index'>) => {
       turns.push({
-        ...turn,
+        ...sources.event(turn),
         ...(timestamp ? { timestamp } : {}),
         index: turns.length,
         id: `${candidate.id}#${turns.length}`,
@@ -187,6 +216,10 @@ export const dshAdapter: ProviderAdapter = {
 
     for await (const raw of readLines(candidate.path)) {
       const line = raw as Line;
+      const message = (line.data?.message ?? {}) as Message;
+      const messageId = typeof line.data?.id === 'string' ? line.data.id : message.id;
+      if (line.type === 'turn/start') nativeTurnId = String(line.data?.turn ?? stats.turnBoundaries.length + 1);
+      sources.record(raw, line.seq !== undefined ? `seq:${line.seq}` : messageId, messageId, undefined, line.data?.turn !== undefined ? String(line.data.turn) : nativeTurnId);
       if (line.type === 'session') {
         createdAt ??= stamp(line.createdAt);
         if (typeof line.cwd === 'string') workspace ??= canonicalizePath(line.cwd);
@@ -199,7 +232,10 @@ export const dshAdapter: ProviderAdapter = {
 
       switch (line.type) {
         case 'session/title':
-          if (typeof data.title === 'string') title = data.title;
+          if (typeof data.title === 'string') {
+            title = data.title;
+            if (!titles.includes(title)) titles.push(title);
+          }
           break;
         case 'model/selection':
         case 'request/context': {
@@ -265,6 +301,7 @@ export const dshAdapter: ProviderAdapter = {
         case 'tool/call':
           push({
             kind: 'tool_call',
+            ...(typeof data.callId === 'string' ? { callId: data.callId } : {}),
             toolName: data.name as string | undefined,
             toolArgs: parseArguments(data.arguments),
             timestamp,
@@ -273,12 +310,15 @@ export const dshAdapter: ProviderAdapter = {
         case 'tool/result': {
           const message = (data.message ?? {}) as Message;
           const result = (message.content ?? []).find((block) => block.type === 'tool-result');
-          const text = textOf(result?.content);
+          // v2 wraps a tool-result block; v4 stores a tool message directly.
+          const text = textOf(result ? result.content : message.content);
           const exit = EXIT_CODE.exec(text.trimEnd());
+          const callId = result?.toolCallId ?? message.toolCallId;
           push({
             kind: 'tool_result',
+            ...(callId ? { callId } : {}),
             toolResult: text,
-            isError: result?.isError === true,
+            isError: (result ? result.isError : message.isError) === true,
             timestamp,
             ...(exit ? { exitCode: Number(exit[1]) } : {}),
           });
@@ -304,6 +344,7 @@ export const dshAdapter: ProviderAdapter = {
         provider: 'dsh',
         path: candidate.path,
         ...(title || firstPrompt ? { title: title ?? firstPrompt } : {}),
+        titles: existingTitles(...titles.map((text): [string, string] => [text, 'provider']), [firstPrompt, 'prompt']),
         ...(workspace ? { workspace } : {}),
         ...(createdAt ? { createdAt } : {}),
         updatedAt: updatedAt ?? new Date(candidate.mtimeMs).toISOString(),

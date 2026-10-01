@@ -73,6 +73,7 @@ export async function refreshSession(
     !!row &&
     !options.force &&
     row.parser_version === PARSER_VERSION &&
+    row.source_path === candidate.path &&
     row.source_size === fingerprint.sourceSize &&
     row.source_mtime_ms === fingerprint.sourceMtimeMs &&
     row.head_hash === fingerprint.headHash &&

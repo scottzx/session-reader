@@ -1,3 +1,4 @@
+import { sourceEvents, existingTitles } from './source.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +18,7 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
 interface Block {
   type?: string;
+  id?: string;
   text?: string;
   thinking?: string;
   name?: string;
@@ -29,6 +31,7 @@ interface Block {
 interface Entry {
   type?: string;
   uuid?: string;
+  parentUuid?: string;
   requestId?: string;
   timestamp?: string;
   cwd?: string;
@@ -129,6 +132,7 @@ export const claudeAdapter: ProviderAdapter = {
 
   async parse(candidate: SessionCandidate): Promise<NormalizedSession> {
     const turns: TurnEvent[] = [];
+    const sources = sourceEvents('claude', candidate.id);
     const stats = emptyProviderStats();
     const tokens: TokenUsage = { input: 0, output: 0, total: 0 };
     let cacheRead = 0;
@@ -142,11 +146,12 @@ export const claudeAdapter: ProviderAdapter = {
     let updatedAt: string | undefined;
 
     const push = (turn: Omit<TurnEvent, 'id' | 'index'>) => {
-      turns.push({ ...turn, index: turns.length, id: `${candidate.id}#${turns.length}` });
+      turns.push({ ...sources.event(turn), index: turns.length, id: `${candidate.id}#${turns.length}` });
     };
 
     for await (const raw of readJsonl(candidate.path)) {
       const entry = raw as Entry;
+      sources.record(raw, entry.uuid, entry.message?.id, entry.parentUuid);
       if (entry.cwd) workspace ??= canonicalizePath(entry.cwd);
       if (entry.timestamp) {
         createdAt ??= entry.timestamp;
@@ -181,11 +186,11 @@ export const claudeAdapter: ProviderAdapter = {
       const timestamp = entry.timestamp;
       const content = entry.message?.content;
 
-      if (entry.type === 'user' && typeof content === 'string') {
-        const text = stripPromptEnvelope(content);
+      if ((entry.type === 'user' || entry.type === 'assistant') && typeof content === 'string') {
+        const text = entry.type === 'user' ? stripPromptEnvelope(content) : content;
         if (!text) continue;
-        firstPrompt ??= oneLine(text, 120);
-        push({ kind: 'user', text, timestamp });
+        if (entry.type === 'user') firstPrompt ??= oneLine(text, 120);
+        push({ kind: entry.type, text, timestamp });
         continue;
       }
       if (!Array.isArray(content)) continue;
@@ -193,7 +198,14 @@ export const claudeAdapter: ProviderAdapter = {
       for (const block of content as Block[]) {
         switch (block.type) {
           case 'text':
-            if (block.text?.trim()) push({ kind: 'assistant', text: block.text, timestamp });
+            if (block.text?.trim()) {
+              const kind = entry.type === 'user' ? 'user' : 'assistant';
+              const text = kind === 'user' ? stripPromptEnvelope(block.text) : block.text;
+              if (text) {
+                if (kind === 'user') firstPrompt ??= oneLine(text, 120);
+                push({ kind, text, timestamp });
+              }
+            }
             break;
           case 'thinking':
             if (block.thinking?.trim()) push({ kind: 'thinking', text: block.thinking, timestamp });
@@ -201,6 +213,7 @@ export const claudeAdapter: ProviderAdapter = {
           case 'tool_use':
             push({
               kind: 'tool_call',
+              ...(block.id ? { callId: block.id } : {}),
               toolName: block.name,
               toolArgs: toolArgsOf(block.input),
               timestamp,
@@ -211,6 +224,7 @@ export const claudeAdapter: ProviderAdapter = {
             const exit = EXIT_CODE.exec(text);
             push({
               kind: 'tool_result',
+              ...(block.tool_use_id ? { callId: block.tool_use_id } : {}),
               toolResult: text,
               isError: block.is_error === true,
               timestamp,
@@ -230,6 +244,7 @@ export const claudeAdapter: ProviderAdapter = {
         provider: 'claude',
         path: candidate.path,
         title: customTitle ?? aiTitle ?? firstPrompt,
+        titles: existingTitles([customTitle, 'custom'], [aiTitle, 'ai'], [firstPrompt, 'prompt']),
         workspace,
         createdAt,
         updatedAt: updatedAt ?? new Date(candidate.mtimeMs).toISOString(),

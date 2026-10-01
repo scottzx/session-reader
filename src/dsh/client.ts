@@ -424,6 +424,13 @@ body[data-ds-dark-theme] .sr-tab-btn.active {
   font-size: 11px;
   color: #888;
 }
+@media (max-width: 800px) {
+  .sr-header { height: auto; min-height: 56px; flex-wrap: wrap; padding: 8px 12px; }
+  .sr-search-input { min-width: 160px; max-width: none; }
+  .sr-sidebar { width: 30%; min-width: 180px; }
+  .sr-header-top { flex-direction: column; align-items: stretch; }
+  .sr-header-actions { flex-wrap: wrap; }
+}
 `;
 
 const ICON_SVG = `<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><polyline points="8 4.2 8 8 10.5 9.5"/></svg>`;
@@ -448,7 +455,7 @@ function isStandalone(): boolean {
   return getBoot().mode === 'standalone';
 }
 
-export function apply(_ctx: any) {
+export function apply(_ctx: any = {}) {
   if (typeof document === 'undefined') return;
   if (_ctx.locale) _ctx.effect(() => _ctx.locale.register('sessionReaderContinuation', continuationDictionaries));
   const translate = _ctx.locale?.bind('sessionReaderContinuation');
@@ -464,6 +471,7 @@ export function apply(_ctx: any) {
 
   // 2. Modal Controller
   let overlayEl: HTMLElement | null = null;
+  let conversation: ReturnType<typeof mountConversation> | undefined;
   let activeSessionId: string | null = null;
   let cachedSessions: any[] = [];
   let currentTab: SrTab = 'chat';
@@ -533,6 +541,7 @@ export function apply(_ctx: any) {
   }
 
   function closePanel() {
+    conversation?.unmount(); conversation = undefined;
     listAbort?.abort();
     detailAbort?.abort();
     listAbort = null;
@@ -665,8 +674,8 @@ export function apply(_ctx: any) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (listAbort !== ac) return;
-      cachedSessions = data.sessions ?? (data.hits ? data.hits.map((h: any) => h.session) : []);
-      if (activeSessionId && !cachedSessions.some((s: any) => s.id === activeSessionId)) {
+      cachedSessions = data.sessions ?? (data.hits ? data.hits.map((h: any) => ({ ...h.session, searchMatches: h.matches })) : []);
+      if (activeSessionId && !cachedSessions.some((s: any) => `${s.provider}:${s.id}` === activeSessionId)) {
         activeSessionId = null;
         activeSessionData = null;
       }
@@ -692,7 +701,7 @@ export function apply(_ctx: any) {
     listEl.innerHTML = '';
     cachedSessions.forEach((s) => {
       const item = document.createElement('div');
-      item.className = `sr-session-item ${s.id === activeSessionId ? 'active' : ''}`;
+      item.className = `sr-session-item ${`${s.provider}:${s.id}` === activeSessionId ? 'active' : ''}`;
       const badgeClass = `sr-badge sr-badge-${s.provider.toLowerCase().replace(/[^a-z]/g, '')}`;
       const timeStr = s.updatedAt ? new Date(s.updatedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
       const wsName = s.workspace ? s.workspace.split('/').pop() : '';
@@ -703,18 +712,20 @@ export function apply(_ctx: any) {
           <span class="sr-item-time">${timeStr}</span>
         </div>
         <div class="sr-item-title" title="${escapeHtml(s.title || '')}">${escapeHtml(s.title || 'Untitled Session')}</div>
+        ${s.searchMatches?.[0] ? `<div class="sr-item-ws">${escapeHtml(s.searchMatches[0].excerpt)}</div>` : ''}
         <div class="sr-item-ws" title="${escapeHtml(s.workspace || '')}">📁 ${escapeHtml(wsName || s.workspace || '')}</div>
       `;
       item.addEventListener('click', () => {
         overlayEl?.querySelectorAll('.sr-session-item').forEach(el => el.classList.remove('active'));
         item.classList.add('active');
-        loadSessionDetail(s.id);
+        loadSessionDetail(`${s.provider}:${s.id}`);
       });
       listEl.appendChild(item);
     });
   }
 
   function renderModalBody() {
+    conversation?.unmount(); conversation = undefined;
     const contentEl = overlayEl?.querySelector('.sr-content');
     if (!contentEl) return;
 
@@ -738,7 +749,7 @@ export function apply(_ctx: any) {
     const standalone = isStandalone();
     const body =
       currentTab === 'chat'
-        ? '<div id="sr-chat-root" style="width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;"></div>'
+        ? '<div style="width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;"><div id="sr-chat-root" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;"></div><div id="sr-tools-root" style="max-height:45%;overflow:auto;flex:none;"></div></div>'
         : currentTab === 'files'
           ? renderFilesView(files)
           : renderOverviewView(overview);
@@ -761,8 +772,8 @@ export function apply(_ctx: any) {
           </div>
         </div>
         ${!standalone && (continuationError || !continuation?.available) ? `<div class="sr-header-path" role="status">${escapeHtml(continuationError || continuation?.reason || copy.unavailable)}</div>` : ''}
-        <div class="sr-header-path" title="${escapeHtml(ref.path || '')}">
-          <span class="sr-header-provider">${ref.provider}</span> · 路径: ${escapeHtml(ref.path || '')}
+        <div class="sr-header-path" title="${escapeHtml(ref.workspace || '')}">
+          <span class="sr-header-provider">${ref.provider}</span> · 工作区: ${escapeHtml(ref.workspace || '未记录')}
         </div>
       </div>
       <div class="sr-scroll-area ${currentTab === 'chat' ? '' : 'sr-scroll-area-flow'}">
@@ -787,12 +798,60 @@ export function apply(_ctx: any) {
     if (currentTab === 'chat') {
       const chatRoot = contentEl.querySelector('#sr-chat-root') as HTMLElement;
       if (chatRoot) {
-        mountConversation(chatRoot, {
-          turns,
+        const items = (turns ?? []).flatMap((turn: any) => (turn.messages ?? []).map((event: any) => ({
+          id: event.locator ?? event.id,
+          kind: event.kind === 'user' ? 'user' : 'assistant_text',
+          content: event.fullText ?? event.text ?? '',
+          createdAt: Number.isFinite(Date.parse(event.timestamp)) ? Date.parse(event.timestamp) : 0,
+          turnId: String(turn.no),
+        })));
+        conversation = mountConversation(chatRoot, {
+          items,
           cwd: ref.workspace || getActiveWorkspaceInfo().cwd,
           lang: 'zh-CN',
           emptyHint: '该会话暂无提取到的轮次记录。',
         });
+      }
+      const toolsRoot = contentEl.querySelector('#sr-tools-root') as HTMLElement | null;
+      const calls = (turns ?? []).flatMap((turn: any) => (turn.toolCalls ?? []).map((call: any) => ({ ...call, turn: turn.no })));
+      if (toolsRoot && calls.length) {
+        toolsRoot.insertAdjacentHTML('beforeend', `<details style="padding:12px;"><summary>工具调用 ${calls.length} 次</summary></details>`);
+        const list = toolsRoot.lastElementChild!;
+        for (const call of calls) {
+          const row = document.createElement('div');
+          row.style.cssText = 'padding:8px 0;border-bottom:1px solid #8883;';
+          const label = document.createElement('div');
+          label.textContent = `第 ${call.turn} 轮 · ${call.toolName ?? '工具'} · ${call.status === 'completed' ? '已完成' : call.status === 'failed' ? '失败' : '结果未确认'}`;
+          row.appendChild(label);
+          const params = new URLSearchParams({ call: call.id });
+          const button = document.createElement('button');
+          button.textContent = '查看详情';
+          const output = document.createElement('pre');
+          output.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;';
+          output.hidden = true;
+          let cursor: string | undefined;
+          button.addEventListener('click', async () => {
+            button.disabled = true;
+            try {
+              if (cursor) params.set('cursor', cursor);
+              const response = await fetch(`/api/session-reader/session/${encodeURIComponent(`${ref.provider}:${ref.id}`)}/content?${params}`);
+              const page = await response.json();
+              if (!response.ok) throw new Error(page.error ?? `HTTP ${response.status}`);
+              if (!row.isConnected) return;
+              output.hidden = false;
+              output.textContent += page.items.map((item: any) => `\n${item.field === 'arguments' ? '参数' : '结果'}\n${item.content}${item.truncationNote ? `\n${item.truncationNote}` : ''}`).join('\n');
+              cursor = page.nextCursor;
+              button.textContent = cursor ? '继续加载' : '已显示全部';
+              button.disabled = !cursor;
+            } catch (error: unknown) {
+              output.hidden = false;
+              output.textContent = error instanceof Error ? error.message : String(error);
+              button.disabled = false;
+            }
+          });
+          row.append(button, output);
+          list.appendChild(row);
+        }
       }
     }
   }

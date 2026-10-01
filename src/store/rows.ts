@@ -1,3 +1,4 @@
+import { decodeText } from './nul.js';
 import type { DatabaseSync } from 'node:sqlite';
 
 /** One indexed event, reduced to the columns a text search needs. */
@@ -10,6 +11,8 @@ export interface TextRow {
   text: string | null;
   tool_result: string | null;
   tool_args_json: string | null;
+  locator: string | null;
+  call_id: string | null;
 }
 
 export interface RowQuery {
@@ -27,7 +30,7 @@ export interface RowQuery {
   fold?: boolean;
 }
 
-const TEXT_COLUMNS = ['text', 'tool_result', 'tool_args_json'] as const;
+const TEXT_COLUMNS = ['text', 'tool_result', 'tool_args_json', 'tool_name', 'full_text'] as const;
 
 /**
  * Streams candidate rows. The filters are structural — session scope,
@@ -67,7 +70,7 @@ export function* searchRows(db: DatabaseSync, query: RowQuery): Generator<TextRo
   }
 
   const sql =
-    `SELECT e.session_id, e.idx, e.kind, e.tool_name, e.ts, e.text, e.tool_result, e.tool_args_json
+    `SELECT e.session_id, e.idx, e.kind, e.tool_name, e.ts, CASE WHEN e.kind IN ('user', 'assistant', 'thinking') THEN coalesce(e.full_text, e.text) ELSE e.text END AS text, CASE WHEN e.kind = 'tool_result' THEN coalesce(e.full_text, e.tool_result) ELSE e.tool_result END AS tool_result, e.tool_args_json, e.locator, e.call_id
      FROM events e
      JOIN temp.search_scope sc ON sc.id = e.session_id
      JOIN sessions s ON s.id = e.session_id` +
@@ -75,7 +78,7 @@ export function* searchRows(db: DatabaseSync, query: RowQuery): Generator<TextRo
     '\n     ORDER BY e.session_id, e.idx';
 
   try {
-    yield* db.prepare(sql).iterate(...params) as unknown as Generator<TextRow>;
+    for (const row of db.prepare(sql).iterate(...params) as unknown as Generator<TextRow>) yield { ...row, text: row.text === null ? null : decodeText(row.text), tool_result: row.tool_result === null ? null : decodeText(row.tool_result) };
   } finally {
     db.exec('DROP TABLE IF EXISTS temp.search_scope');
   }

@@ -23,7 +23,7 @@ export interface OpenRequest { sessionId: string; provider?: AgentProvider }
 export async function continuationAvailability(ctx: OpenContext, ref: Pick<SessionRef, 'provider'>): Promise<Availability> {
   if (ref.provider === 'dsh') return { available: true, agent: 'dsh' };
   const service = ctx.get?.('oneagentsAcpSessions');
-  if (!service) return { available: false, reason: '续聊需要安装并启用 @1agents/dsh-acp；历史仍可只读查看' };
+  if (!service) return { available: false, reason: '续聊需要安装并启用 @1agents/acp-service；历史仍可只读查看' };
   return service.availability(ref.provider);
 }
 

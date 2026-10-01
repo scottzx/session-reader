@@ -8,11 +8,11 @@
  */
 
 /** DDL layout. A bump drops and rebuilds the whole database. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 /** L1 semantics — anything in `parsers/` that changes normalized events. */
-export const PARSER_VERSION = 3;
+export const PARSER_VERSION = 5;
 /** L2 rules — `writes.ts` / `ledger.ts`. Re-derives facts from stored events. */
-export const EXTRACTOR_VERSION = 2;
+export const EXTRACTOR_VERSION = 3;
 /** L3 rules — `store/edges.ts`. Re-derives edges from stored events. */
 export const EDGE_VERSION = 1;
 
@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   edge_version      INTEGER NOT NULL DEFAULT 0,
   indexed_at        TEXT,
   artifacts_json    TEXT,
+  ref_json          TEXT,
   stats_json        TEXT
 );
 
@@ -61,8 +62,23 @@ CREATE TABLE IF NOT EXISTS events (
   pid            TEXT,
   duration_ms    INTEGER,
   provider_truncated INTEGER,                 -- the provider's own "shortened copy" flag
+  locator        TEXT,
+  call_id        TEXT,
+  full_text      TEXT,
+  extra_json     TEXT,
   PRIMARY KEY (session_id, idx)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS turn_ranges (
+  session_id TEXT NOT NULL,
+  no INTEGER NOT NULL,
+  start_idx INTEGER NOT NULL,
+  end_idx INTEGER NOT NULL,
+  summary_json TEXT NOT NULL,
+  PRIMARY KEY (session_id, no)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_event_locator ON events (session_id, locator);
+CREATE INDEX IF NOT EXISTS idx_event_call ON events (session_id, call_id);
 
 CREATE TABLE IF NOT EXISTS file_ops (
   session_id  TEXT NOT NULL,

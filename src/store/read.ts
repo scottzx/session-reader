@@ -1,3 +1,4 @@
+import { selectSession } from '../identity.js';
 import { decodeText } from './nul.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { turnStartsFrom } from '../turns.js';
@@ -33,6 +34,7 @@ export interface SessionRow {
   indexed_at: string | null;
   artifacts_json: string | null;
   stats_json: string | null;
+  ref_json: string | null;
 }
 
 export function sessionRow(db: DatabaseSync, id: string): SessionRow | undefined {
@@ -41,14 +43,16 @@ export function sessionRow(db: DatabaseSync, id: string): SessionRow | undefined
 
 /** Resolves a full id, an id prefix, or a native id against the index. */
 export function findSessionRow(db: DatabaseSync, needle: string): SessionRow | undefined {
-  const exact = db
-    .prepare('SELECT * FROM sessions WHERE id = ? OR native_id = ? LIMIT 1')
-    .get(needle, needle) as SessionRow | undefined;
-  if (exact) return exact;
-  if (needle.length < 6) return undefined;
-  return db
-    .prepare('SELECT * FROM sessions WHERE native_id LIKE ? ORDER BY ended_at DESC LIMIT 1')
-    .get(`${needle}%`) as SessionRow | undefined;
+  const lower = needle.toLowerCase();
+  const colon = lower.indexOf(':');
+  const provider = colon >= 0 ? lower.slice(0, colon) : undefined;
+  const native = colon >= 0 ? lower.slice(colon + 1) : lower;
+  const exact = db.prepare('SELECT * FROM sessions WHERE lower(id) = ? OR (lower(native_id) = ? AND (? IS NULL OR provider = ?))').all(lower, native, provider ?? null, provider ?? null) as unknown as SessionRow[];
+  if (exact.length) return selectSession(exact, needle);
+  if (native.length < 6) return undefined;
+  const rows = db.prepare('SELECT * FROM sessions WHERE substr(lower(native_id), 1, ?) = ? AND (? IS NULL OR provider = ?)').all(native.length, native, provider ?? null, provider ?? null) as unknown as SessionRow[];
+  return selectSession(rows, needle);
+
 }
 
 export interface ListQuery {
@@ -134,6 +138,7 @@ export function refOf(row: SessionRow): SessionRef {
     ...(row.started_at === null ? {} : { createdAt: row.started_at }),
     ...(row.ended_at === null ? {} : { updatedAt: row.ended_at }),
     sizeBytes: row.source_size,
+    ...(row.ref_json ? JSON.parse(row.ref_json) : {}),
   };
 }
 
@@ -151,16 +156,20 @@ interface EventRow {
   pid: string | null;
   duration_ms: number | null;
   provider_truncated: number | null;
+  locator: string | null;
+  call_id: string | null;
+  full_text: string | null;
+  extra_json: string | null;
 }
 
 /**
  * Rebuilds events exactly as the parser emitted them — absent optionals stay
  * absent, so the result deep-equals a fresh `parse()`.
  */
-function eventsOf(db: DatabaseSync, id: string, nativeId: string): TurnEvent[] {
+export function eventsOf(db: DatabaseSync, id: string, nativeId: string, from = 0, to = Number.MAX_SAFE_INTEGER): TurnEvent[] {
   const rows = db
-    .prepare('SELECT * FROM events WHERE session_id = ? ORDER BY idx')
-    .all(id) as unknown as EventRow[];
+    .prepare('SELECT * FROM events WHERE session_id = ? AND idx BETWEEN ? AND ? ORDER BY idx')
+    .all(id, from, to) as unknown as EventRow[];
   return rows.map((row) => ({
     id: `${nativeId}#${row.idx}`,
     index: row.idx,
@@ -178,6 +187,10 @@ function eventsOf(db: DatabaseSync, id: string, nativeId: string): TurnEvent[] {
     ...(row.pid === null ? {} : { processId: row.pid }),
     ...(row.exit_code === null ? {} : { exitCode: row.exit_code }),
     ...(row.duration_ms === null ? {} : { durationMs: row.duration_ms }),
+    ...(row.locator === null ? {} : { locator: row.locator }),
+    ...(row.call_id === null ? {} : { callId: row.call_id }),
+    ...(row.full_text === null ? {} : { fullText: decodeText(row.full_text) }),
+    ...(row.extra_json ? JSON.parse(row.extra_json) : {}),
   }));
 }
 

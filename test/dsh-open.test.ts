@@ -49,7 +49,7 @@ test('missing ACP keeps history read-only, while native DSH opens its existing i
     workspaceRegistry: { create: async (cwd: string) => { assert.equal(cwd, '/native/dsh/workspace'); return { id: 'workspace', attachSession: async (id: string) => { attached.push(id); } }; } },
   };
   assert.equal((await continuationAvailability(ctx, { provider: 'claude' })).available, false);
-  await assert.rejects(openSessionInDsh(ctx, { sessionId: 'same-native-id', provider: 'claude' }), /dsh-acp/);
+  await assert.rejects(openSessionInDsh(ctx, { sessionId: 'same-native-id', provider: 'claude' }), /acp-service/);
   assert.deepEqual(opened, []);
   assert.equal((await openSessionInDsh(ctx, { sessionId: 'same-native-id', provider: 'dsh' })).continuation, 'dsh');
   assert.deepEqual(opened, ['session-same-native-id']);

@@ -1,3 +1,4 @@
+import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../reader.js';
 /**
  * `1session serve` — session-reader 作为 DreamMate Network 的第一个标准 Service。
  *
@@ -10,7 +11,6 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { listRecentSessions, loadSession } from '../resolver.js';
 import { buildOverview } from '../overview.js';
-import { summarizeTurns } from '../turns.js';
 import { searchSessions } from '../search.js';
 import { canonicalizePath } from '../util/paths.js';
 import type { AgentProvider, TurnKind } from '../types.js';
@@ -117,16 +117,32 @@ async function route(ctx: Ctx): Promise<{ status: number; body: unknown }> {
     };
   }
 
+  const content = /^\/v1\/sessions\/([^/]+)\/content$/.exec(pathname);
+  if (content) {
+    const id = decodeURIComponent(content[1]!);
+    const options = { cursor: q(ctx, 'cursor'), maxChars: q(ctx, 'maxChars') === undefined ? undefined : Number(q(ctx, 'maxChars')) };
+    if (q(ctx, 'raw') === 'true' && !q(ctx, 'event')) throw new Error('raw requires event');
+    const body = q(ctx, 'call') ? await readCall(id, q(ctx, 'call')!, options)
+      : q(ctx, 'artifact') ? await readArtifact(id, q(ctx, 'artifact')!, options)
+      : q(ctx, 'event') ? await (q(ctx, 'raw') === 'true' ? readOriginalRecords : readEvents)(id, ctx.url.searchParams.getAll('event'), options)
+      : await readTurns(id, q(ctx, 'turns') ?? '1', options);
+    await noteRead('turns', id, ctx.caller);
+    return { status: 200, body };
+  }
+
   const detail = /^\/v1\/sessions\/([^/]+)(\/turns)?$/.exec(pathname);
   if (detail) {
     const id = decodeURIComponent(detail[1]!);
     const wantTurns = detail[2] !== undefined;
+    if (wantTurns) {
+      const directory = await readTurnDirectory(id);
+      await noteRead('turns', id, ctx.caller);
+      return { status: 200, body: { uri: sessionUri(identity.name, directory.session.provider, directory.session.id), turns: directory.turns } };
+    }
     const session = await loadSession(id, { useIndex: true });
     await noteRead(wantTurns ? 'turns' : 'overview', id, ctx.caller);
     const uri = sessionUri(identity.name, session.ref.provider, session.ref.id);
-    return wantTurns
-      ? { status: 200, body: { uri, turns: summarizeTurns(session) } }
-      : { status: 200, body: { uri, ...buildOverview(session) } };
+    return { status: 200, body: { uri, ...buildOverview(session) } };
   }
 
   if (pathname === '/v1/search') {
@@ -142,6 +158,9 @@ async function route(ctx: Ctx): Promise<{ status: number; body: unknown }> {
       caseSensitive: q(ctx, 'case') === 'true',
       context: qn(ctx, 'context'),
       maxPerSession: qn(ctx, 'max-hits'),
+      area: q(ctx, 'area') as never, sessionId: q(ctx, 'session'),
+      terms: ctx.url.searchParams.getAll('term').length ? ctx.url.searchParams.getAll('term') : undefined,
+      operator: q(ctx, 'operator') as never, sort: q(ctx, 'sort') as never, cursor: q(ctx, 'cursor'),
       useIndex: true,
     });
     return {

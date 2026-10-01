@@ -1,3 +1,4 @@
+import { callsIn, toolResults } from './calls.js';
 import { readFullStepOutput } from './parsers/antigravity.js';
 import { oneLine } from './util/text.js';
 import { fileWrites, rawCommand, resolveWritePath } from './writes.js';
@@ -29,7 +30,7 @@ function assessTurn(
   const openCalls = events.filter(
     (event) =>
       event.kind === 'tool_call' &&
-      !events.some((other) => other.kind === 'tool_result' && other.index > event.index),
+      (event.callId ? !toolResults(events, event).length : !events.some((other) => other.kind === 'tool_result' && other.index > event.index)),
   );
   const last = events.at(-1);
 
@@ -182,6 +183,8 @@ export function summarizeTurns(session: NormalizedSession): TurnSummary[] {
       files: [...files],
       commands,
       errors,
+      toolCount: callsIn(events).length,
+      nativeTurnIds: [...new Set([...owned.map((boundary) => boundary.id), ...events.map((event) => event.source?.nativeTurnId)].filter((id): id is string => !!id))],
       outcome: oneLine(outcome?.text ?? native?.lastMessage, 120),
     };
   });
@@ -255,7 +258,7 @@ export async function eventDetails(session: NormalizedSession, spec: string): Pr
 export async function eventDetail(session: NormalizedSession, eventIndex: number): Promise<EventDetail> {
   const event = session.turns[eventIndex];
   if (!event) throw new Error(`no event ${eventIndex} (session has ${session.turns.length})`);
-  if (!event.truncated || session.ref.provider !== 'antigravity' || event.sourceIndex === undefined) {
+  if (event.fullText !== undefined || !event.truncated || session.ref.provider !== 'antigravity' || event.sourceIndex === undefined) {
     return { ...event };
   }
   const full = await readFullStepOutput(session.ref.path, event.sourceIndex);

@@ -3,9 +3,12 @@ import {
   resolveSession,
   searchSessions,
   buildOverview,
-  summarizeTurns,
-  turnDetail,
-  eventDetails,
+  readTurnDirectory,
+  readTurns,
+  readOriginalRecords,
+  readEvents,
+  readCall,
+  readArtifact,
 } from '../index.js';
 import { handleSessionApi } from '../web/api.js';
 import { openSessionInDsh, continuationAvailability } from './open.js';
@@ -29,6 +32,12 @@ export function apply(ctx: any) {
         since: { type: 'string', description: 'Time filter, e.g. 24h, 7d, 30d' },
         kind: { type: 'string', description: 'Filter by kind: user, assistant, thinking, tool_call, tool_result' },
         limit: { type: 'number', description: 'Max number of sessions to return' },
+        area: { type: 'string', description: 'dialogue (default), tools, artifacts, or all' },
+        sessionId: { type: 'string', description: 'Restrict search to one exact session or unique prefix' },
+        terms: { type: 'array', items: { type: 'string' }, description: 'Explicit literal terms' },
+        operator: { type: 'string', description: 'and (default) or or' },
+        sort: { type: 'string', description: 'relevance (default) or time' },
+        cursor: { type: 'string', description: 'Continue from a returned search cursor' },
       },
       output: {
         schema: { type: 'array' },
@@ -53,20 +62,9 @@ export function apply(ctx: any) {
           since: args.since,
           kinds: args.kind ? [args.kind] : undefined,
           limit: args.limit,
+          area: args.area, sessionId: args.sessionId, terms: args.terms, operator: args.operator, sort: args.sort, cursor: args.cursor,
         });
-        return hits.map((h: any) => ({
-          sessionId: h.session.id,
-          provider: h.session.provider,
-          workspace: h.session.workspace,
-          title: h.session.title,
-          updatedAt: h.session.updatedAt,
-          matchCount: h.matches.length,
-          matches: h.matches.slice(0, 5).map((m: any) => ({
-            turn: m.turn,
-            kind: m.kind,
-            excerpt: m.excerpt,
-          })),
-        }));
+        return hits;
       },
     }));
 
@@ -109,20 +107,24 @@ export function apply(ctx: any) {
         render: (_args: any, value: any) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
       },
       async execute(args: any) {
-        const resolved = await resolveSession(args.sessionId);
-        if (!resolved) throw new Error(`Session not found: ${args.sessionId}`);
-        const normalized = await resolved.adapter.parse(resolved.candidate);
-        return summarizeTurns(normalized);
+        return (await readTurnDirectory(args.sessionId)).turns;
       },
     }));
 
     // session_turn_detail
     ctx.effect(() => ctx.tools.register({
       name: 'session_turn_detail',
-      description: 'Inspect full untruncated events, tool calls, and results for a specific turn in a session.',
+      description: 'Read full dialogue for one or several turns, exact event references, tool calls with results, or artifacts. Long content is paginated.',
       parameters: {
         sessionId: { type: 'string', required: true, description: 'Session ID or 8-char prefix' },
-        turn: { type: 'number', required: true, description: 'Turn number' },
+        turn: { type: 'number', description: 'Turn number (default 1)' },
+        turns: { type: 'string', description: 'Turn selector, e.g. 1-3 or 1,4' },
+        locator: { type: 'string', description: 'Exact event locator from search' },
+        raw: { type: 'boolean', description: 'Read original JSONL records; requires locator or events' },
+        callId: { type: 'string', description: 'Native call ID or call event locator' },
+        artifactPath: { type: 'string', description: 'Exact artifact path from search' },
+        cursor: { type: 'string', description: 'Continue from the returned content cursor' },
+        maxChars: { type: 'number', description: 'Page character budget (default 32000)' },
         events: { type: 'string', description: 'Event selector, e.g. "11", "11-13", "11,15,22"' },
       },
       output: {
@@ -130,13 +132,12 @@ export function apply(ctx: any) {
         render: (_args: any, value: any) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
       },
       async execute(args: any) {
-        const resolved = await resolveSession(args.sessionId);
-        if (!resolved) throw new Error(`Session not found: ${args.sessionId}`);
-        const normalized = await resolved.adapter.parse(resolved.candidate);
-        if (args.events) {
-          return await eventDetails(normalized, args.events);
-        }
-        return turnDetail(normalized, args.turn);
+        const options = { cursor: args.cursor, maxChars: args.maxChars };
+        if (args.callId) return readCall(args.sessionId, args.callId, options);
+        if (args.artifactPath) return readArtifact(args.sessionId, args.artifactPath, options);
+        if (args.raw && !args.locator && !args.events) throw new Error('raw requires locator or events');
+        if (args.locator || args.events) return (args.raw ? readOriginalRecords : readEvents)(args.sessionId, [args.locator ?? args.events], options);
+        return readTurns(args.sessionId, args.turns ?? String(args.turn ?? 1), options);
       },
     }));
 

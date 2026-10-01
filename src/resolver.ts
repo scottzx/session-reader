@@ -1,9 +1,10 @@
+import { selectSession } from './identity.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { antigravityAdapter } from './parsers/antigravity.js';
 import { claudeAdapter } from './parsers/claude.js';
 import { codexAdapter } from './parsers/codex.js';
-import { dshAdapter } from './parsers/dsh.js';
+import { dshAdapter, dshTranscriptPath } from './parsers/dsh.js';
 import { grokAdapter } from './parsers/grok.js';
 import type { ProviderAdapter, SessionCandidate } from './parsers/provider.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
@@ -188,22 +189,17 @@ export async function findResolvedByWorkspace(
 /** Locates a session by full id, id prefix, or native file path. */
 export async function resolveSession(sessionId: string, provider?: AgentProvider): Promise<ResolvedSession | undefined> {
   const asPath = sessionId.includes('/') ? canonicalizePath(sessionId) : undefined;
-  const needle = sessionId.toLowerCase();
-  let prefixHit: { adapter: ProviderAdapter; candidate: SessionCandidate } | undefined;
-
+  const handles: { adapter: ProviderAdapter; candidate: SessionCandidate }[] = [];
   for (const adapter of adapters) {
     if (provider && adapter.provider !== provider) continue;
-    for (const candidate of await adapter.listCandidates()) {
-      if (asPath ? candidate.path === asPath : candidate.id.toLowerCase() === needle) {
-        return { ref: await adapter.scanRef(candidate), adapter, candidate };
-      }
-      if (!asPath && !prefixHit && needle.length >= 6 && candidate.id.toLowerCase().startsWith(needle)) {
-        prefixHit = { adapter, candidate };
-      }
-    }
+    for (const candidate of await adapter.listCandidates()) handles.push({ adapter, candidate });
   }
-  if (!prefixHit) return undefined;
-  return { ...prefixHit, ref: await prefixHit.adapter.scanRef(prefixHit.candidate) };
+  const chosen = asPath
+    ? handles.find((handle) => handle.candidate.path === asPath)
+    : selectSession(handles.map((handle) => ({ ...handle, provider: handle.adapter.provider, native_id: handle.candidate.id, id: `${handle.adapter.provider}:${handle.candidate.id}` })), sessionId);
+  if (!chosen) return undefined;
+  return { adapter: chosen.adapter, candidate: chosen.candidate, ref: await chosen.adapter.scanRef(chosen.candidate) };
+
 }
 
 export async function parseSession(sessionId: string): Promise<NormalizedSession> {
@@ -238,7 +234,7 @@ export async function loadSession(
   // A session the index already knows can be re-checked with a single stat,
   // instead of walking every provider directory again.
   const row = findSessionRow(db, sessionId);
-  const handle = (row ? await handleFromPath(row.provider, row.native_id, row.source_path) : undefined)
+  const handle = (row && row.id.toLowerCase() === sessionId.toLowerCase() ? await indexedHandle(row) : undefined)
     ?? (await resolveSession(sessionId));
   if (!handle) throw new Error(`session not found: ${sessionId}`);
   const result = await indexSession(db, handle, { ...(options.force ? { force: true } : {}) });
@@ -259,4 +255,13 @@ async function handleFromPath(
     adapter,
     candidate: { id: nativeId, path: sourcePath, mtimeMs: stat.mtimeMs, sizeBytes: stat.size },
   };
+}
+
+/** Reuses the indexed file path without enumerating providers. */
+export async function indexedHandle(row: { provider: string; native_id: string; source_path: string }) {
+  if (row.provider === 'dsh') {
+    const current = await dshTranscriptPath(path.dirname(row.source_path));
+    return current ? handleFromPath(row.provider, row.native_id, current) : undefined;
+  }
+  return handleFromPath(row.provider, row.native_id, row.source_path);
 }

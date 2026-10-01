@@ -1,3 +1,5 @@
+import { auxiliaryFingerprint } from '../util/fingerprint.js';
+import { sourceEvents, existingTitles } from './source.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -396,20 +398,10 @@ export const grokAdapter: ProviderAdapter = {
   },
 
   /** The side files change without the transcript growing; fold them in. */
-  async auxFingerprint(candidate: SessionCandidate): Promise<string | undefined> {
+  async auxFingerprint(candidate: SessionCandidate): Promise<string> {
     const dir = path.dirname(candidate.path);
-    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => undefined);
-    if (!entries) return undefined;
-    let newest = 0;
-    let count = 0;
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      const stat = await fs.stat(path.join(dir, entry.name)).catch(() => undefined);
-      if (!stat) continue;
-      count++;
-      newest = Math.max(newest, Math.round(stat.mtimeMs));
-    }
-    return `${count}:${newest}`;
+    const names = await fs.readdir(dir).catch(() => [] as string[]);
+    return auxiliaryFingerprint(names.filter((name) => name !== TRANSCRIPT && name !== 'terminal').map((name) => path.join(dir, name)));
   },
 
   async scanRef(candidate: SessionCandidate): Promise<SessionRef> {
@@ -448,6 +440,7 @@ export const grokAdapter: ProviderAdapter = {
     const dir = path.dirname(candidate.path);
     const stats = emptyProviderStats();
     const turns: TurnEvent[] = [];
+    const sources = sourceEvents('grok', candidate.id);
 
     const summary = await readJson<Summary>(path.join(dir, 'summary.json'));
     const signals = await readJson<{ compactionCount?: number }>(path.join(dir, 'signals.json'));
@@ -486,7 +479,7 @@ export const grokAdapter: ProviderAdapter = {
     // back from it would stop deep-equalling a fresh parse.
     const push = ({ timestamp, ...turn }: Omit<TurnEvent, 'id' | 'index'>) => {
       turns.push({
-        ...turn,
+        ...sources.event(turn),
         ...(timestamp ? { timestamp } : {}),
         index: turns.length,
         id: `${candidate.id}#${turns.length}`,
@@ -495,6 +488,7 @@ export const grokAdapter: ProviderAdapter = {
 
     for await (const raw of readJsonl(candidate.path)) {
       const line = raw as ChatLine;
+      sources.record(raw);
       switch (line.type) {
         case 'user': {
           const rawText = textOf(line.content);
@@ -544,6 +538,7 @@ export const grokAdapter: ProviderAdapter = {
             const stream = call.id ? updates?.byCall.get(call.id) : undefined;
             push({
               kind: 'tool_call',
+              ...(call.id ? { callId: call.id } : {}),
               toolName: call.name,
               toolArgs: parseArguments(call.arguments),
               timestamp: timing?.startedAt ?? stream?.calledAt,
@@ -556,6 +551,7 @@ export const grokAdapter: ProviderAdapter = {
           const stream = line.tool_call_id ? updates?.byCall.get(line.tool_call_id) : undefined;
           push({
             kind: 'tool_result',
+            ...(line.tool_call_id ? { callId: line.tool_call_id } : {}),
             toolResult: textOf(line.content) || String(line.content ?? ''),
             // Grok stores the outcome in the event log, never on the result.
             ...(timing ? { isError: timing.failed === true } : {}),
@@ -613,6 +609,8 @@ export const grokAdapter: ProviderAdapter = {
         provider: 'grok',
         path: candidate.path,
         ...(title ? { title } : {}),
+        titles: existingTitles([summary?.generated_title, 'ai'], [firstPrompt, 'prompt']),
+        ...(summary?.session_summary ? { summary: summary.session_summary } : {}),
         ...(workspace ? { workspace } : {}),
         ...(summary?.created_at ? { createdAt: summary.created_at } : {}),
         updatedAt:

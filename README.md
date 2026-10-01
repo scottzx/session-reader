@@ -11,7 +11,7 @@
 | `antigravity` | `~/.gemini/antigravity/brain/<uuid>/.system_generated/logs/transcript.jsonl`（+ 同级 `implementation_plan.md` / `walkthrough.md` 等产出物） | `run_command` 的 `Cwd`；缺失时由所操作文件向上找 `.git` |
 | `claude` | `~/.claude/projects/<slug>/<session-id>.jsonl` | 条目自带的 `cwd` 字段（目录 slug 只用作快速预筛） |
 | `codex` | `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` | `session_meta` / `turn_context` 的 `cwd` |
-| `dsh`（DeepSeek Harness） | `~/.dsh/sessions/<slug>/session-<uuid>/session.v2.jsonl.zstd`（**zstd 分帧压缩**） | 开篇 `session` 记录的 `cwd` |
+| `dsh`（DeepSeek Harness） | `~/.dsh/sessions/<slug>/session-<uuid>/session.v{2,4}.jsonl[.zstd]`（支持 **zstd 分帧压缩**） | 开篇 `session` 记录的 `cwd` |
 | `grok` | `~/.grok/sessions/<percent-encoded cwd>/<uuid>/chat_history.jsonl`（+ 同目录 `events.jsonl` / `rewind_points.jsonl` / `updates.jsonl` / `summary.json` / `goal/*.md`） | `summary.json` 的 `info.cwd`；目录名本身就是 cwd 的百分号编码，可反解 |
 
 所有会话被归一为同一组 `TurnEvent`：`user` / `assistant` / `thinking` / `tool_call` / `tool_result`。
@@ -101,19 +101,68 @@ npm run build && node dist/bin/1session.js <command>
 | `1session list [--limit n] [--scope <path>\|cwd\|global] [--provider name] [--since 24h] [--json]` | 按最近更新列出各智能体的会话（默认当前 pwd 子树，见 `--scope`） |
 | `1session overview <session-id> [--json]` | **第 1 层**：统计卡片（轮次/文件/命令/提交/产物/上传/后台任务/token）+ 目标、口径修正、状态锚点、全量落盘 |
 | `1session turns <session-id> [--json]` | **第 2 层**：逐轮概要——时间、耗时、事件区间、文件/命令/失败数、用户说了什么、agent 回了什么 |
-| `1session turn <session-id> <n> [--event k\|a-b\|a,b,c] [--json]` | **第 3 层**：展开某一轮的全部事件；`--event` 定位工具调用，输出完整参数与**未截断**结果，支持 `491`、`491-493`、`491,495,502` |
+| `1session turn <session-id> <n> [--event k\|a-b\|a,b,c] [--json]` | **第 3 层**：默认读取用户与助手的可见正文、附工具目录；支持批量轮次、`--locator`、`--call`、`--artifact`、`--raw` 和游标分页 |
 | `1session digest <session-id> [--focus marketing\|review\|full] [--json]` | 单会话蒸馏：目标、改动文件、命令、关键节点 |
 | `1session workspace [path] [--since 24h] [--limit n] [--digest] [--focus f] [--json]` | **按 pwd 跨智能体聚合**（默认 `.`）；带 `--digest` 输出统一故事线 |
 | `1session jobs <id> [--json]` | 异步作业账本：状态 + **证据** + pid / host / log |
 | `1session commands <id> [--failed] [--host h] [--turn n] [--json]` | 命令账本：exit_code / 耗时 / cwd |
 | `1session files <id> [--group project\|runtime\|log\|all] [--json]` | 文件账本，按项目 / 运行态 / 日志分组 |
 | `1session errors <id> [--json]` | 失败命令，带 stderr 与"同前缀命令后续是否成功" |
-| `1session search <query> [--scope <path>\|cwd\|global] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--include-self] [--json]` | 跨会话全文检索：命中带 `T<轮次> · E<事件号>` 句柄 + 上下文片段（默认当前 pwd 子树，见 `--scope`） |
+| `1session search <query> [--scope <path>\|cwd\|global] [--since 24h] [--limit n] [--kind k1,k2] [--regex] [--case] [--context n] [--max-hits n] [--include-self] [--json]` | 关键词检索：默认搜对话与已落盘标题 / 摘要；`--area` 选择工具或产物，`--session` 限定会话，支持排序、分组与游标 |
 | `1session index [<id>] [--all] [--scope <path>\|cwd\|global] [--force] [--since 30d]` | 建立 / 刷新索引；`--all` 全库回填 |
 | `1session graph <id> [--json]`（别名 `related`） | 会话之间的引用关系 + 每条边的证据 |
 | `1session skill install\|status\|uninstall [--agent a,b] [--copy] [--force] [--dry-run]` | 把内置 skill 装进五家智能体的 skills 目录（见上） |
 
 全局开关 `--no-index` 绕过索引直读源文件。
+
+### 关键词、ID 与原文读取
+
+检索只使用已落盘内容与确定性规则，不生成 AI 概要，不引入向量检索。
+
+| `--area` | 可搜索字段 |
+| --- | --- |
+| `dialogue`（默认） | 用户 / 助手可见正文、当前标题、已保存的 AI / 自定义标题、provider 已保存的会话摘要 |
+| `tools` | 工具名、参数、结果；Antigravity 可恢复的完整输出也参与检索 |
+| `artifacts` | 已识别产物的名称、路径、摘要与文本正文 |
+| `all` | 上述三类合并；仍不包含 thinking |
+
+`--kind` 显式限定事件类型时，只搜索指定事件。默认轮次阅读保留所有可见消息的顺序、换行与代码块，
+工具参数 / 结果按需读取；thinking 和指令封套不进入默认预览。系统提示词没有统一字段：`--raw` 可核对所选事件记录中保存的指令封套；
+未对应归一化事件的独立系统记录，仍需打开源文件查看。不补造缺失内容。
+
+```bash
+1session search 'src/ledger.ts' --global --area tools
+1session search '发布 npm' --global --sort time
+1session search ignored --global --terms '["发布","完成"]' --operator and
+1session search '超时' --global --session 'claude:<完整原生ID>' --max-hits 10 --json
+1session turn 'claude:<完整原生ID>' 2-4 --json
+1session turn 'claude:<完整原生ID>' --locator '<命中的event:引用>' --json
+1session turn 'claude:<完整原生ID>' --call '<原生调用ID>' --json
+1session turn 'claude:<完整原生ID>' --artifact '<命中的产物路径>' --json
+1session turn 'claude:<完整原生ID>' --locator '<event:引用>' --raw --json
+```
+
+普通 query 是一个字面字符串，空格不会自动分词。`--terms` 提供明确的 AND / OR 条件；
+AND 在同一消息的字段内匹配，也可跨同一原生工具调用的参数与结果匹配，不拼接无关轮次。
+默认按字段优先级（标题、对话 / 工具名 / 参数、结果等）、时间倒序与稳定 ID 排序；
+`--sort time` 优先时间。事件缺少时间时使用会话更新时间，并标记 `timeSource: session`。
+JSON 返回命中字段、字符区间、片段、轮次 / 调用分组，以及未展示数量和 `nextCursor`。
+每个字段最多展示 20 个字符区间，更多区间用 `hasMoreRanges` 标明；原文不受该展示上限影响。
+
+推荐保存 `provider:完整原生ID` 与事件 `locator`。短 ID 仅允许唯一匹配；重名直接报错并列候选，
+即使索引只收录了部分会话也会核对源目录。`Tn` / `En` 是当前解析下的便捷序号，不作为持久 ID。
+有原生记录 ID 时 locator 随追加保持稳定；缺少原生 ID 时使用记录序号与校验和，源记录改写后拒绝旧引用。
+工具结果只按原生调用 ID 关联；没有 ID 的调用标为 `unconfirmed`，不猜测相邻结果。
+
+`turn` 默认每页最多 32,000 个字符，可用 `--max-chars` 调整，接着用相同选择器和 `--cursor` 继续。
+正文保持原始换行与代码块；JSON 的 `offset` / `totalChars` 表明读取进度。`--raw` 要求 `--event` 或
+`--locator`，读取对应的原始 JSONL 记录（含默认视图隐藏字段）。来源发生相关变化时游标报错，要求重新读取。
+provider 已截断且没有旁路原文时会明确提示；索引和分页不会再次丢弃尾部。
+
+共享 TypeScript API 为 `readTurnDirectory`、`readTurns`、`readEvents`、`readOriginalRecords`、`readCall`、
+`readArtifact`。HTTP 使用 `/v1/sessions/<id>/content?turns=2-4`，或 `event=<locator>`、`call=<id>`、
+`artifact=<path>`；附 `raw=true` 可读原始事件记录。面向 agent 的 CLI / DSH 工具使用相同检索核心与游标协议。
+索引新增轮次区间与事件 / 调用索引，局部读取只加载所选范围；首次升级按现有缓存策略重建一次。
 
 ### `--scope`：会话按路径子树取
 
@@ -218,8 +267,8 @@ T 3 2026-09-11T13:03:29 (283s)  事件 29–45  文件 1 · 命令 7 · 失败 0
     ↳ 1session turn 5575981e 7 --event 318
 ```
 
-每条命中前缀就是**下钻句柄** `T<轮次> · E<事件号>`——顺序照着 `turn <id> <T> --event <E>` 排，
-每个会话再附一条拼好的命令，从第 1 层到第 3 层不用再跑一趟 `turns` 人工比对事件区间。
+事件命中携带 `T<轮次> · E<事件号>` 和稳定 `locator`；标题、摘要、产物命中属于会话层，
+不伪造轮次。每组附可直接执行的读取命令。
 
 **默认折叠本次检索自己留下的脚印**：调用方的会话是边跑边索引的，`1session search "X"` 这条
 命令本身（以及它打印出来的东西）会立刻成为 `X` 的第一条命中。判据只有一条——五分钟内写下的
@@ -478,16 +527,16 @@ $ 1session graph ca8325e1
 从 npm 安装到 DSH Web profile（包内声明了 `dsh.bundle.patch`，安装后自动启用）：
 
 ```sh
-pnpm dsh plugin --profile web add @1agents/session-reader @1agents/dsh-acp
+pnpm dsh plugin --profile web add @1agents/session-reader @1agents/acp-service
 ```
 
-只查看历史时可只安装 `@1agents/session-reader`；插件按请求查询 ACP 服务，不把 ACP 注册为加载依赖。已安装独立 `dsh` 命令时省略开头的 `pnpm`；桌面版将 profile 改为 `desktop`。更新包后重启对应的 DSH 服务。使用 `@1agents/dsh-acp@>=0.2.0` 时，插件默认自动启动或复用本地 ACP 服务，无需另开终端；远程地址或 `serviceMode: external` 仍由外部管理。具体配置见 [ACP 插件说明](https://github.com/scottzx/1acp/tree/main/packages/dsh-plugin)。
+只查看历史时可只安装 `@1agents/session-reader`；插件按请求查询 ACP 服务，不把 ACP 注册为加载依赖。已安装独立 `dsh` 命令时省略开头的 `pnpm`；桌面版将 profile 改为 `desktop`。更新包后重启对应的 DSH 服务。使用统一包 `@1agents/acp-service@>=0.5.0` 时，插件默认自动启动或复用本地 ACP 服务，无需另开终端；远程地址或 `serviceMode: external` 仍由外部管理。具体配置见 [ACP 插件说明](https://github.com/scottzx/1acp/tree/main/packages/dsh-plugin)。
 
 DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。入口沿用「插件」「自动化任务」的主文字色、字号、行高、圆角、悬停与键盘焦点样式；展开时使用 16px 图标，折叠时使用 18px 图标和 36px 按钮，颜色跟随 DSH 的亮暗主题。
 
 ### 在 DSH 中继续原会话
 
-安装并启用 `@1agents/dsh-acp`，启动其配置的 acp-service 后，Claude、Codex、Grok 的历史详情提供「在 DSH 中继续原会话」。session-reader 读取历史并调用 ACP 插件的 `oneagentsAcpSessions` 服务；1acp 恢复原 Agent 的原生会话，后续输入继续发给它。原工作目录必须存在；不会改用当前目录或新建空会话。DSH 来源直接打开原有 DSH 会话，不复制或重写日志。
+安装并启用 `@1agents/acp-service` 的 DSH 插件，启动其配置的 acp-service 后，Claude、Codex、Grok 的历史详情提供「在 DSH 中继续原会话」。session-reader 读取历史并调用 ACP 插件的 `oneagentsAcpSessions` 服务；1acp 恢复原 Agent 的原生会话，后续输入继续发给它。原工作目录必须存在；不会改用当前目录或新建空会话。DSH 来源直接打开原有 DSH 会话，不复制或重写日志。
 
 ACP 未安装、Agent 未就绪或来源不支持时，历史仍可只读查看。导入、鉴权和恢复失败会显示原因并保留预览。重复导入打开同一个 DSH 会话；导入历史是一次性快照，不持续同步其他客户端新增的消息。旧版导入产生的历史副本不会自动改绑。外部工具调用与结果保留为只读历史记录，不触发 DSH 工具执行。
 
@@ -496,6 +545,10 @@ ACP 未安装、Agent 未就绪或来源不支持时，历史仍可只读查看�
 验证当前 DSH 事件兼容性：先运行 `npm run build`，再运行 `node scripts/check-dsh-import.mjs /absolute/path/DSH`（DSH checkout 须已构建）。`test/fixtures/dsh-import/` 保存用户消息、思考、工具调用与结果，以及未完成尾部的固定历史快照。
 
 ## `1session web`：独立浏览器
+
+前端面向人类用户，重点是会话列表、完整对话、文件浏览，以及点击查看工具参数和结果。保留简单关键词搜索；
+组合条件、字段范围、稳定 ID 定位、检索排序与游标等查询能力由面向 agent 的 CLI / 工具入口提供，
+不在浏览界面展示事件类型、原始 locator 或查询协议。
 
 没有 DSH 也能看同一套历史会话列表、对话预览和文件账本：
 

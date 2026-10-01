@@ -20,6 +20,13 @@ The index lives at `~/.1agents/session-reader/index.db`. It fingerprints each
 session file (size + mtime + head hash) and reparses only changed bytes, so
 `list` never silently truncates older sessions no matter how wide `--scope` is.
 
+DSH supports v2 and v4 transcripts, plain or zstd-compressed. When both remain
+after a migration, the current format wins and the session ID stays unchanged.
+Unknown versions produce a `SESSION_FORMAT_UNSUPPORTED` warning on stderr with
+the source path; they are skipped without falling back to an older transcript.
+The warning does not alter the JSON on stdout. A zero-match result therefore
+does not establish absence from any sources named in those warnings.
+
 ## Discovery
 
 ### `list`
@@ -41,12 +48,20 @@ workspace basename, title.
                 [--limit n] [--provider name]
                 [--kind user,assistant,thinking,tool_call,tool_result]
                 [--regex] [--case] [--context n] [--max-hits n]
-                [--include-self] [--json]
+                [--area dialogue|tools|artifacts|all] [--session <id>]
+                [--terms <JSON array>] [--operator and|or] [--sort relevance|time]
+                [--cursor <cursor>] [--include-self] [--json]
 ```
 
-Full-text across sessions; prints matching turns with surrounding context.
+Keyword search across sessions; defaults to user/assistant text and persisted
+provider titles/summaries. Tools and artifacts are opt-in through `--area`.
+AND terms match one message or one native tool call with its results; OR matches
+any term. Default order is field relevance, then newest time and stable tie breaks.
+`--sort time` prioritizes newest time. JSON includes fields, ranges, groups and
+`nextCursor`; repeat the same query and filters with `--cursor` to continue.
 
-Every hit carries `T<turn> · E<event>`, in the order the drill-down wants, and
+Event hits carry `T<turn> · E<event>` and a stable `locator`. Metadata and artifact
+hits belong to the session level. Event handles are in the order the drill-down wants, and
 each session ends with the command already assembled:
 
 ```text
@@ -111,22 +126,42 @@ number to drill into.
 
 ### `turn <id> <n> [--event k|a-b|a,b,c]`
 
-Layer 3. Every event in a turn. With `--event`, the named events with full
-arguments and **untruncated** results — the only way to see what a command
-actually printed.
+Layer 3. Visible user/assistant dialogue plus a tool directory by default.
+With `--event`, read the selected events explicitly, including tool arguments,
+results or thinking. Long content uses cursors rather than silent truncation.
 
 `--event` takes one index (`491`), a range (`491-493`), a list (`491,495,502`),
 or a mix, up to 50 events in one call; ranges are clipped to the session, so
 `560-999` means "to the end". Reading a tool call usually means reading its
 result and the assistant's verdict too, which is the range form in one process
-instead of three. `--json` returns an object for a bare index and an array for
-anything that asked for more than one.
+instead of three. `--json` returns a page object with `items` and optional
+`nextCursor` for both single and batch reads.
 
 ### `digest <id> [--focus marketing|review|full]`
 
 Compact narrative: goal, changed files, commands, key moments (需求 / 转向 / 受阻 /
 结论). `--focus review` leans toward what broke and how it was resolved;
 `marketing` toward the story; `full` keeps everything.
+
+### Exact and paginated content reads
+
+```bash
+1session turn 'claude:<full-id>' 1-3 --json
+1session turn 'claude:<full-id>' --locator '<event:reference>' --json
+1session turn 'claude:<full-id>' --call '<native-call-id>' --json
+1session turn 'claude:<full-id>' --artifact '<registered-path>' --json
+1session turn 'claude:<full-id>' --event 11 --raw --json
+```
+
+Default turn content includes every visible user/assistant message and a tool
+metadata directory. Tool parameters, results and thinking are read explicitly.
+`--raw` returns original JSONL records, including omitted instruction envelopes.
+Pages default to 32,000 characters; `--max-chars` changes the budget. Repeat the
+same selector with `--cursor` using `nextCursor`, until no cursor remains.
+`offset` and `totalChars` preserve precise progress; changed sources invalidate
+cursors. Prefer canonical `provider:full-id`; ambiguous prefixes fail with candidates.
+Native event locators remain stable across appends, positional fallbacks include a
+record checksum. Numeric turns/events are convenience addresses of the current parse.
 
 ## Ledgers
 

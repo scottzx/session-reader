@@ -4,7 +4,7 @@ import path from 'node:path';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
 import { buildOverview } from '../src/overview.js';
-import { eventDetails, summarizeTurns, turnDetail } from '../src/turns.js';
+import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../src/reader.js';
 import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { listRecentSessions, loadSession } from '../src/resolver.js';
 import { searchSessions } from '../src/search.js';
@@ -18,7 +18,8 @@ const USAGE = `1session — cross-agent session Read Plane
   1session list [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--since 24h] [--json]
   1session overview <session-id> [--json]              第 1 层：会话概要
   1session turns <session-id> [--json]                 第 2 层：逐轮概要
-  1session turn <session-id> <n> [--event <k|a-b|a,b,c>] [--json]
+  1session turn <session-id> <n|a-b|a,b,c> [--event <k|a-b|a,b,c>] [--locator <ref>] [--raw]
+                          [--call <id>] [--artifact <path>] [--cursor <cursor>] [--max-chars n] [--json]
                           第 3 层：单轮 / 单次或多次工具调用明细
   1session jobs <session-id> [--json]                  异步作业账本
   1session commands <session-id> [--failed] [--host h] [--turn n] [--json]
@@ -37,9 +38,11 @@ const USAGE = `1session — cross-agent session Read Plane
   1session search <query> [--scope <path>|cwd|global] [--since 24h] [--limit n] [--provider name]
                           [--kind user,assistant,thinking,tool_call,tool_result]
                           [--regex] [--case] [--context n] [--max-hits n]
+                          [--area dialogue|tools|artifacts|all] [--session <id>]
+                          [--terms <JSON array>] [--operator and|or] [--sort relevance|time] [--cursor <cursor>]
                           [--include-self] [--json]
 
-search 的每条命中带 T<轮次> · E<事件号>，可直接拼成 1session turn <id> <T> --event <E>。
+search 命中附带稳定 locator；元数据与产物命中不属于某一轮。--raw 按需读取原始记录。
 默认折叠本次检索自身在活跃会话里留下的回声，--include-self 展开。
 
 全局：--no-index 绕过索引直读源文件。索引位于 ~/.1agents/session-reader/index.db
@@ -110,13 +113,6 @@ const kindsOf = (value: string | boolean | undefined): TurnKind[] | undefined =>
     ?.split(',')
     .map((kind) => kind.trim())
     .filter(Boolean) as TurnKind[] | undefined;
-/**
- * The drill-down handle a hit carries: `T9 · E221` reads straight into
- * `1session turn <id> 9 --event 221`. Turn first, because that is the order
- * the command wants it in.
- */
-const handle = (turn: number, event: number): string => `T${turn || '?'} · E${event}`;
-
 const focusOf = (value: string | boolean | undefined): DigestFocus => {
   const focus = str(value);
   return focus === 'marketing' || focus === 'full' ? focus : 'review';
@@ -331,13 +327,14 @@ async function main(): Promise<void> {
     }
 
     case 'turns': {
-      const session = await load(positional[0]);
-      const summaries = summarizeTurns(session);
+      if (!positional[0]) throw new Error('missing session ID');
+      const directory = await readTurnDirectory(positional[0], { useIndex });
+      const summaries = directory.turns;
       print(
         json,
         summaries,
         [
-          `${summaries.length} 轮 · 共 ${session.turns.length} 个事件`,
+          `${summaries.length} 轮 · 共 ${directory.eventCount} 个事件`,
           '',
           ...summaries.flatMap((turn) => [
             `${TURN_MARK[turn.status] ?? '·'} T${String(turn.no).padStart(2, ' ')} ${turn.startedAt?.slice(0, 19) ?? '?'}` +
@@ -355,51 +352,27 @@ async function main(): Promise<void> {
     }
 
     case 'turn': {
-      const session = await load(positional[0]);
-      const spec = str(flags.event);
-      if (spec !== undefined) {
-        const details = await eventDetails(session, spec);
-        // A bare index keeps returning one object; a range or a list — which
-        // the caller had to ask for explicitly — returns the array.
-        const single = /^\s*\d+\s*$/.test(spec);
-        print(
-          json,
-          single ? details[0] : details,
-          details
-            .map((detail) => {
-              const body = detail.fullText ?? detail.text ?? detail.toolResult ?? '';
-              return [
-                `#${detail.index} ${detail.kind}${detail.toolName ? `(${detail.toolName})` : ''} ${detail.timestamp ?? ''}` +
-                  `${detail.truncated ? (detail.fullText ? '  [已从 steps/ 补全]' : '  [已截断]') : ''}`,
-                ...(detail.toolArgs ? ['', '参数：', JSON.stringify(detail.toolArgs, null, 2)] : []),
-                ...(body ? ['', '内容：', body] : []),
-                ...(detail.truncationNote ? ['', `⚠️ ${detail.truncationNote}`] : []),
-              ].join('\n');
-            })
-            .join('\n\n────────\n\n'),
-        );
-        break;
-      }
-      const detail = turnDetail(session, num(positional[1]) ?? 1);
-      print(
-        json,
-        detail,
-        [
-          `T${detail.summary.no}  ${detail.summary.startedAt ?? '?'} → ${detail.summary.endedAt ?? '?'}` +
-            `  事件 ${detail.summary.events[0]}–${detail.summary.events[1]}`,
-          `▸ ${detail.summary.prompt}`,
-          ...(detail.summary.files.length ? ['', `改动：${detail.summary.files.join(', ')}`] : []),
-          '',
-          ...detail.events.map((event) => {
-            const head = `#${event.index} ${event.kind}${event.toolName ? `(${event.toolName})` : ''}` +
-              `${event.truncated ? ' [截断]' : ''}${event.isError ? ' ✗' : ''}`;
-            return `${head}  ${oneLine(event.text ?? event.toolResult ?? JSON.stringify(event.toolArgs), 160)}`;
-          }),
-          '',
-          `（--event <k> 展开单个事件的完整内容；--event ${detail.summary.events[0]}-` +
-            `${Math.min(detail.summary.events[0] + 2, detail.summary.events[1])} 或 --event a,b,c 一次读相邻几条）`,
-        ].join('\n'),
-      );
+      const id = positional[0];
+      if (!id) throw new Error('missing session ID');
+      const options = { useIndex, cursor: str(flags.cursor), maxChars: num(flags['max-chars']) };
+      const selectors = str(flags.locator)?.split(',') ?? (str(flags.event) ? [str(flags.event)!] : undefined);
+      const page = str(flags.call) ? await readCall(id, str(flags.call)!, options)
+        : str(flags.artifact) ? await readArtifact(id, str(flags.artifact)!, options)
+        : selectors ? await (flags.raw === true ? readOriginalRecords : readEvents)(id, selectors, options)
+        : await readTurns(id, positional[1] ?? '1', options);
+      if (flags.raw === true && !selectors) throw new Error('--raw requires --event or --locator');
+      const turnPage = 'summaries' in page ? page as Awaited<ReturnType<typeof readTurns>> : undefined;
+      print(json, page, [
+        `${page.session.provider}:${page.session.id}`,
+        ...(turnPage ? turnPage.summaries.map((summary) => `T${summary.no} 事件 ${summary.events[0]}–${summary.events[1]}`) : []),
+        ...page.items.map((item) => `\n#${item.index} ${item.kind}${item.toolName ? ` (${item.toolName})` : ''} ${item.field}` +
+          `${item.offset || item.content.length < item.totalChars ? ` [${item.offset}–${item.offset + item.content.length}/${item.totalChars}]` : ''}` +
+          `${item.recovered ? ' [已从 steps/ 补全]' : item.providerTruncated ? ' [来源已截断]' : ''}` +
+          `\n${item.content}${item.truncationNote ? `\n${item.truncationNote}` : ''}`),
+        ...(turnPage ? [`\n工具调用 ${turnPage.tools.length} 次`, ...turnPage.tools.map((call) =>
+          `  #${call.event} ${call.toolName ?? '?'} [${call.status}] ${call.association}\n    ↳ 1session turn ${page.session.provider}:${page.session.id} --call '${call.id}'`)] : []),
+        ...(page.nextCursor ? [`\n继续读取：添加 --cursor '${page.nextCursor}'`] : []),
+      ].join('\n'));
       break;
     }
 
@@ -417,6 +390,12 @@ async function main(): Promise<void> {
         context: num(flags.context),
         maxPerSession: num(flags['max-hits']),
         useIndex,
+        area: str(flags.area) as never,
+        sessionId: str(flags.session),
+        terms: str(flags.terms) ? JSON.parse(str(flags.terms)!) : undefined,
+        operator: str(flags.operator) as never,
+        sort: str(flags.sort) as never,
+        cursor: str(flags.cursor),
       });
       // The searcher's own live transcript is noise by default: the query is
       // in it because this very command put it there.
@@ -441,23 +420,21 @@ async function main(): Promise<void> {
               ...(foldNote ? [foldNote] : []),
               ...hits.flatMap((hit) => [
                 '',
-                `### ${hit.session.provider} ${hit.session.id.slice(0, 8)}  ` +
+                `### ${hit.session.provider}:${hit.session.id}  ` +
                   `${hit.session.createdAt ?? '?'} → ${hit.session.updatedAt ?? '?'}  (${hit.totalMatches} 命中)`,
                 `    ${oneLine(hit.session.title, 80)}`,
-                ...hit.matches.map(
-                  (match) =>
-                    `  ${handle(match.turn, match.index)} ` +
-                    `${match.kind}${match.toolName ? `(${match.toolName})` : ''}  ${match.excerpt}`,
-                ),
-                ...(hit.matches[0]
-                  ? [
-                      `    ↳ 1session turn ${hit.session.id.slice(0, 8)} ` +
-                        `${hit.matches[0].turn || '<轮次>'} --event ${hit.matches[0].index}`,
-                    ]
-                  : []),
-                ...(hit.totalMatches > hit.matches.length
-                  ? [`  …另有 ${hit.totalMatches - hit.matches.length} 处（--max-hits 调大或 --json 查看全部）`]
-                  : []),
+                ...(hit.groups ?? [{ turn: 0, matches: hit.matches }]).flatMap((group) => [
+                  `  ${group.turn ? `T${group.turn}` : '会话 / 产物'}`,
+                  ...group.matches.map((match) => `    ${match.index >= 0 ? `E${match.index}` : ''} ${match.kind}${match.toolName ? `(${match.toolName})` : ''} [${match.fields?.map((field) => field.field).join(', ')}] ${match.excerpt}`),
+                  ...(group.matches[0] ? (() => {
+                    const match = group.matches[0]!;
+                    const id = `${hit.session.provider}:${hit.session.id}`;
+                    const selector = match.artifactPath ? `--artifact '${match.artifactPath}'`
+                      : match.callId ? `--call '${match.callId}'` : group.turn ? `${group.turn}` : '';
+                    return selector ? [`    ↳ 1session turn ${id} ${selector}`] : [`    ↳ 1session turns ${id}`];
+                  })() : []),
+                ]),
+                ...(hit.nextCursor ? [`  下一页：--cursor '${hit.nextCursor}'`] : []),
                 ...(!includeSelf && hit.suppressed
                   ? [`  …另折叠 ${hit.suppressed} 处本次检索自身的回声（--include-self 展开）`]
                   : []),

@@ -1,3 +1,4 @@
+import { sourceEvents, existingTitles } from './source.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,6 +22,7 @@ const ROLLOUT = /^rollout-.*?-([0-9a-fA-F-]{36})\.jsonl$/;
 
 interface Line {
   timestamp?: string;
+  ordinal?: number;
   type?: string;
   payload?: Record<string, unknown>;
 }
@@ -233,6 +235,7 @@ export const codexAdapter: ProviderAdapter = {
 
   async parse(candidate: SessionCandidate): Promise<NormalizedSession> {
     const turns: TurnEvent[] = [];
+    const sources = sourceEvents('codex', candidate.id);
     const stats = emptyProviderStats();
     const tokens: TokenUsage = { input: 0, output: 0, total: 0 };
     let title: string | undefined;
@@ -241,12 +244,14 @@ export const codexAdapter: ProviderAdapter = {
     let updatedAt: string | undefined;
 
     const push = (turn: Omit<TurnEvent, 'id' | 'index'>) => {
-      turns.push({ ...turn, index: turns.length, id: `${candidate.id}#${turns.length}` });
+      turns.push({ ...sources.event(turn), index: turns.length, id: `${candidate.id}#${turns.length}` });
     };
 
     for await (const raw of readJsonl(candidate.path)) {
       const line = raw as Line;
       const payload = line.payload ?? {};
+      const native = typeof line.ordinal === 'number' ? `ordinal:${line.ordinal}` : typeof payload.id === 'string' ? payload.id : undefined;
+      sources.record(raw, native, typeof payload.id === 'string' ? payload.id : undefined, undefined, typeof payload.turn_id === 'string' ? payload.turn_id : undefined);
       const timestamp = line.timestamp;
       if (timestamp) {
         createdAt ??= timestamp;
@@ -263,7 +268,7 @@ export const codexAdapter: ProviderAdapter = {
 
       switch (payload.type) {
         case 'message': {
-          const text = stripPromptEnvelope(textOf(payload.content));
+          const text = payload.role === 'user' ? stripPromptEnvelope(textOf(payload.content)) : textOf(payload.content);
           if (!text) break;
           if (payload.role === 'assistant') {
             push({ kind: 'assistant', text, timestamp });
@@ -284,6 +289,7 @@ export const codexAdapter: ProviderAdapter = {
         case 'function_call':
           push({
             kind: 'tool_call',
+            ...(typeof payload.call_id === 'string' ? { callId: payload.call_id } : {}),
             toolName: payload.name as string | undefined,
             toolArgs: parseArguments(payload.arguments),
             timestamp,
@@ -292,6 +298,7 @@ export const codexAdapter: ProviderAdapter = {
         case 'custom_tool_call':
           push({
             kind: 'tool_call',
+            ...(typeof payload.call_id === 'string' ? { callId: payload.call_id } : {}),
             toolName: payload.name as string | undefined,
             toolArgs: { input: payload.input },
             timestamp,
@@ -300,6 +307,7 @@ export const codexAdapter: ProviderAdapter = {
         case 'local_shell_call':
           push({
             kind: 'tool_call',
+            ...(typeof payload.call_id === 'string' ? { callId: payload.call_id } : {}),
             toolName: 'shell',
             toolArgs: toolArgsOf(payload.action) ?? {},
             timestamp,
@@ -310,6 +318,7 @@ export const codexAdapter: ProviderAdapter = {
           const output = textOf(payload.output) || String(payload.output ?? '');
           push({
             kind: 'tool_result',
+            ...(typeof payload.call_id === 'string' ? { callId: payload.call_id } : {}),
             toolResult: output,
             // A bare "error" substring matches ordinary prose; require a real
             // non-zero exit or a fatal marker at the start of a line.
@@ -331,6 +340,7 @@ export const codexAdapter: ProviderAdapter = {
         provider: 'codex',
         path: candidate.path,
         title,
+        titles: existingTitles([title, 'prompt']),
         workspace,
         createdAt,
         updatedAt: updatedAt ?? new Date(candidate.mtimeMs).toISOString(),

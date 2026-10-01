@@ -1,3 +1,4 @@
+import { summarizeTurns } from '../turns.js';
 import { encodeText } from './nul.js';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -61,7 +62,7 @@ export function writeSession(
   const id = canonicalId(session.ref.provider, session.ref.id);
   db.exec('BEGIN IMMEDIATE');
   try {
-    for (const table of ['events', 'file_ops', 'commands', 'jobs']) {
+    for (const table of ['events', 'turn_ranges', 'file_ops', 'commands', 'jobs']) {
       db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(id);
     }
     db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
@@ -69,8 +70,8 @@ export function writeSession(
       `INSERT INTO sessions (
          id, provider, native_id, source_path, workspace, title, started_at, ended_at,
          event_count, turn_count, source_size, source_mtime_ms, head_hash, aux_fingerprint,
-         parser_version, extractor_version, edge_version, indexed_at, artifacts_json, stats_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+         parser_version, extractor_version, edge_version, indexed_at, artifacts_json, ref_json, stats_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
     ).run(
       id,
       session.ref.provider,
@@ -89,14 +90,15 @@ export function writeSession(
       PARSER_VERSION,
       new Date().toISOString(),
       JSON.stringify(session.artifacts),
+      JSON.stringify({ ...(session.ref.titles ? { titles: session.ref.titles } : {}), ...(session.ref.summary ? { summary: session.ref.summary } : {}) }),
       JSON.stringify(session.stats),
     );
 
     const insert = db.prepare(
       `INSERT INTO events (
          session_id, idx, kind, text, tool_name, tool_args_json, tool_result, is_error,
-         ts, source_index, exit_code, pid, duration_ms, provider_truncated
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ts, source_index, exit_code, pid, duration_ms, provider_truncated, locator, call_id, full_text, extra_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     // Event text is stored whole. Capping it at 128KB shrank the index by
     // 0.08% and silently dropped search hits from long build logs — exactly
@@ -117,8 +119,14 @@ export function writeSession(
         event.processId ?? null,
         event.durationMs ?? null,
         event.truncated === undefined ? null : event.truncated ? 1 : 0,
+        event.locator ?? null,
+        event.callId ?? null,
+        encodeText(event.fullText),
+        JSON.stringify({ ...(event.source ? { source: event.source } : {}), ...(event.fullTextPath ? { fullTextPath: event.fullTextPath } : {}), ...(event.truncationNote ? { truncationNote: event.truncationNote } : {}) }),
       );
     }
+    const insertTurn = db.prepare('INSERT INTO turn_ranges VALUES (?, ?, ?, ?, ?)');
+    for (const turn of summarizeTurns(session)) insertTurn.run(id, turn.no, ...turn.events, JSON.stringify(turn));
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');

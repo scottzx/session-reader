@@ -148,3 +148,7 @@ export {
 export { createServer, serve, type ServeOptions } from './serve/http.js';
 export { convertSessionToDshEvents, type DshSessionEvent, type ConvertOptions } from './dsh/adapter.js';
 export { apply, inject, name } from './dsh/index.js';
+
+export { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact, contentPage } from './reader.js';
+export type { ReadOptions, ContentItem } from './reader.js';
+export { callsIn, toolResults } from './calls.js';

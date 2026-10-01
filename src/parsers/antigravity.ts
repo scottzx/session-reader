@@ -1,3 +1,5 @@
+import { auxiliaryFingerprint } from '../util/fingerprint.js';
+import { sourceEvents, existingTitles } from './source.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -294,35 +296,30 @@ export const antigravityAdapter: ProviderAdapter = {
    * `parse` also reads the artifacts sitting next to the transcript, so the
    * transcript's own size and mtime are not the whole identity.
    */
-  async auxFingerprint(candidate: SessionCandidate): Promise<string | undefined> {
+  async auxFingerprint(candidate: SessionCandidate): Promise<string> {
     const dir = path.dirname(path.dirname(path.dirname(candidate.path)));
-    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => undefined);
-    if (!entries) return undefined;
-    let newest = 0;
-    let count = 0;
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      const stat = await fs.stat(path.join(dir, entry.name)).catch(() => undefined);
-      if (!stat) continue;
-      count++;
-      newest = Math.max(newest, Math.round(stat.mtimeMs));
-    }
-    return `${count}:${newest}`;
+    const names = await fs.readdir(dir).catch(() => [] as string[]);
+    return auxiliaryFingerprint([
+      ...names.filter((name) => name !== '.system_generated').map((name) => path.join(dir, name)),
+      ...['steps', 'tasks', 'messages'].map((name) => path.join(dir, '.system_generated', name)),
+    ]);
   },
 
   async parse(candidate: SessionCandidate): Promise<NormalizedSession> {
     const turns: TurnEvent[] = [];
+    const sources = sourceEvents('antigravity', candidate.id);
     let title: string | undefined;
     let workspace = await workspaceFromConversation(candidate.id);
     let createdAt: string | undefined;
 
     const stats = emptyProviderStats();
     const push = (turn: Omit<TurnEvent, 'id' | 'index'>) => {
-      turns.push({ ...turn, index: turns.length, id: `${candidate.id}#${turns.length}` });
+      turns.push({ ...sources.event(turn), index: turns.length, id: `${candidate.id}#${turns.length}` });
     };
 
     for await (const raw of readJsonl(candidate.path)) {
       const step = raw as Step;
+      sources.record(raw, step.step_index !== undefined ? `step:${step.step_index}` : undefined);
       const timestamp = step.created_at;
       createdAt ??= timestamp;
       const sourceIndex = step.step_index;
@@ -370,6 +367,17 @@ export const antigravityAdapter: ProviderAdapter = {
       }
     }
 
+    for (const event of turns) {
+      if (!event.truncated || event.sourceIndex === undefined) continue;
+      const full = await readFullStepOutput(candidate.path, event.sourceIndex);
+      if (full !== undefined && event.kind !== 'tool_call') {
+        event.fullText = full;
+        event.fullTextPath = path.resolve(path.dirname(candidate.path), '..', 'steps', String(event.sourceIndex), 'output.txt');
+      } else if (full === undefined) {
+        event.truncationNote = `transcript 已截断，steps/${event.sourceIndex}/output.txt 不存在`;
+      }
+    }
+
     const dir = path.resolve(path.dirname(candidate.path), '..', '..');
     const systemDir = path.join(dir, '.system_generated');
     const artifacts = await readArtifacts(dir);
@@ -381,6 +389,7 @@ export const antigravityAdapter: ProviderAdapter = {
         provider: 'antigravity',
         path: candidate.path,
         title: title ?? clip(artifacts[0]?.name, 120),
+        titles: existingTitles([title, 'prompt']),
         workspace,
         createdAt,
         updatedAt: turns.at(-1)?.timestamp ?? new Date(candidate.mtimeMs).toISOString(),

@@ -68,7 +68,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/bundle-client.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test test/session-reader.test.ts test/dsh-adapter.test.ts test/dsh-open.test.ts test/web.test.ts",
+    "test": "node --import tsx --test test/session-reader.test.ts test/dsh-adapter.test.ts test/dsh-open.test.ts test/web.test.ts test/retrieval.test.ts test/dsh-format.test.ts",
     "prepack": "npm run build",
     "1session": "tsx bin/1session.ts"
   },
