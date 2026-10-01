@@ -53,7 +53,7 @@ try {
   const response = { setHeader() {}, end(value) { this.body = JSON.parse(value); } };
   await route.handler(request, response);
   assert.equal(response.body.available, false);
-  assert.match(response.body.reason, /dsh-acp/);
+  assert.match(response.body.reason, /@1agents\/acp-service/);
   const removeAcp = ctx.provide('oneagentsAcpSessions', { availability: async () => ({ available: true, agent: 'codex' }) });
   await route.handler(request, response);
   assert.equal(response.body.available, true);

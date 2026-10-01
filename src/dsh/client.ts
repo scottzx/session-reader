@@ -1,6 +1,11 @@
 // Browser client entry for @1agents/session-reader in DSH Web
-import { mountConversation, renderMarkdown } from '@1agents/chat-ui';
+import { renderMarkdown } from '@1agents/chat-ui';
 import { continuationCopy, continuationDictionaries } from './copy.js';
+import { agentReference, sessionKey } from '../web/references.js';
+import type { SessionRef, TurnSummary } from '../types.js';
+import type { SearchMatch, SearchHit } from '../search.js';
+import type { ContentItem } from '../reader.js';
+import type { callsIn } from '../calls.js';
 
 const CSS_TEXT = `
 /* Match DSH SidebarRoot panel rows in expanded and collapsed layouts. */
@@ -62,374 +67,146 @@ const CSS_TEXT = `
   display: none;
 }
 
-/* Modal Overlay */
+/* Reader: search, confirm the original, and copy a portable reference. */
 .sr-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 99999;
-  background: var(--dsw-alias-bg-mask-2, rgba(0,0,0,0.45));
-  backdrop-filter: blur(4px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  color: var(--dsw-alias-label-primary, #1c1e26);
+  --sr-bg: var(--dsw-alias-bg-base, #fff);
+  --sr-surface: var(--dsw-alias-bg-layer-1, #f6f7f9);
+  --sr-text: var(--dsw-alias-label-primary, #202633);
+  --sr-muted: var(--dsw-alias-label-secondary, #687386);
+  --sr-border: var(--dsw-alias-border-l1, #e3e7ee);
+  --sr-accent: var(--dsw-alias-state-business-primary, #315cd6);
+  position: fixed; inset: 0; z-index: 99999;
+  background: var(--dsw-alias-bg-mask-2, #0006); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--sr-text); font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+body[data-ds-dark-theme] .sr-overlay {
+  --sr-bg: #1e1e20; --sr-surface: #252528; --sr-text: #e5e5ea;
+  --sr-muted: #a6adbb; --sr-border: #3a3a3e; --sr-accent: #8aaaff;
+}
+.sr-overlay * { box-sizing: border-box; }
 .sr-card {
-  width: min(1140px, 94vw);
-  height: min(820px, 90vh);
-  background: var(--dsw-alias-bg-overlay, #ffffff);
-  border-radius: 12px;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
+  width: min(1360px, 96vw); height: min(900px, 92vh); min-height: 0;
+  background: var(--sr-bg); border: 1px solid var(--sr-border); border-radius: 12px;
+  box-shadow: 0 20px 60px #0004; display: flex; flex-direction: column; overflow: hidden;
 }
-body[data-ds-dark-theme] .sr-card {
-  background: #1e1e20;
-  border-color: #333336;
-  color: #e5e5ea;
+.sr-header { padding: 14px 18px; border-bottom: 1px solid var(--sr-border); }
+.sr-header-top, .sr-header-actions, .sr-search-row, .sr-item-header, .sr-message-header, .sr-reader-toolbar {
+  display: flex; align-items: center; gap: 8px;
 }
-
-/* Header */
-.sr-header {
-  height: 56px;
-  padding: 0 18px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--dsw-alias-bg-base, #ffffff);
-  border-bottom: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
+.sr-header-top { justify-content: space-between; }
+.sr-header-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
+.sr-header-hint, .sr-item-time, .sr-item-ws, .sr-header-path, .sr-status, .sr-message-meta {
+  font-size: 12px; color: var(--sr-muted);
 }
-body[data-ds-dark-theme] .sr-header {
-  background: #252528;
-  border-color: #333336;
+.sr-search-row { margin-top: 12px; flex-wrap: wrap; }
+.sr-search-input, .sr-select, .sr-btn {
+  height: 34px; border: 1px solid var(--sr-border); border-radius: 6px; color: inherit;
+  background: var(--sr-bg); font: inherit; padding: 0 10px;
 }
-.sr-header-title {
-  font-size: 15px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  white-space: nowrap;
-}
-.sr-search-input {
-  flex: 1;
-  max-width: 320px;
-  height: 32px;
-  padding: 0 12px;
-  border-radius: 6px;
-  border: 1px solid var(--dsw-alias-border-l1, #d1d5db);
-  background: var(--dsw-alias-bg-layer-1, #f9fafb);
-  color: inherit;
-  font-size: 13px;
-}
-body[data-ds-dark-theme] .sr-search-input {
-  background: #18181a;
-  border-color: #3a3a3e;
-}
-.sr-select {
-  height: 32px;
-  padding: 0 8px;
-  border-radius: 6px;
-  border: 1px solid var(--dsw-alias-border-l1, #d1d5db);
-  background: var(--dsw-alias-bg-layer-1, #f9fafb);
-  color: inherit;
-  font-size: 12px;
-}
-body[data-ds-dark-theme] .sr-select {
-  background: #18181a;
-  border-color: #3a3a3e;
-}
-.sr-btn {
-  height: 32px;
-  padding: 0 12px;
-  border-radius: 6px;
-  border: none;
-  background: var(--dsw-alias-interactive-bg-hover, #f3f4f6);
-  color: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-body[data-ds-dark-theme] .sr-btn {
-  background: #2e2e33;
-}
-.sr-btn:hover {
-  filter: brightness(0.95);
-}
-.sr-btn-close {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  justify-content: center;
-  font-size: 16px;
-}
-
-/* Layout Split */
-.sr-main {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
-.sr-sidebar {
-  width: 330px;
-  flex: none;
-  border-right: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
-  overflow-y: auto;
-  background: var(--dsw-alias-bg-layer-1, #fafafa);
-}
-body[data-ds-dark-theme] .sr-sidebar {
-  background: #18181a;
-  border-color: #333336;
-}
-.sr-session-item {
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06));
-  cursor: pointer;
-  transition: background 0.12s ease;
-}
-body[data-ds-dark-theme] .sr-session-item {
-  border-color: rgba(255,255,255,0.06);
-}
-.sr-session-item:hover {
-  background: rgba(0,0,0,0.03);
-}
-body[data-ds-dark-theme] .sr-session-item:hover {
-  background: rgba(255,255,255,0.04);
-}
-.sr-session-item.active {
-  background: var(--dsw-alias-state-business-secondary, #eff6ff);
-  border-left: 3px solid var(--dsw-alias-state-business-primary, #3b82f6);
-}
-body[data-ds-dark-theme] .sr-session-item.active {
-  background: #1e283d;
-  border-left-color: #60a5fa;
-}
-.sr-item-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
-}
-.sr-badge {
-  font-size: 10px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 4px;
-  text-transform: uppercase;
-}
+.sr-search-input { flex: 1; min-width: 200px; }
+.sr-btn { cursor: pointer; white-space: nowrap; }
+.sr-btn:hover, .sr-select:hover { background: var(--sr-surface); }
+.sr-btn:disabled { cursor: default; opacity: .5; }
+.sr-btn.sr-primary { background: var(--sr-accent); border-color: var(--sr-accent); color: var(--sr-bg); }
+.sr-overlay button:focus-visible, .sr-overlay input:focus-visible, .sr-overlay select:focus-visible,
+.sr-overlay summary:focus-visible { outline: 2px solid var(--sr-accent); outline-offset: 2px; }
+.sr-btn-close { width: 32px; padding: 0; }
+.sr-main { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.sr-sidebar { width: 330px; flex: none; overflow: auto; background: var(--sr-surface); border-right: 1px solid var(--sr-border); }
+.sr-list-heading { padding: 12px 16px; color: var(--sr-muted); font-size: 12px; }
+.sr-session-item { border-bottom: 1px solid var(--sr-border); padding: 12px 16px; }
+.sr-session-item.active { background: var(--sr-bg); box-shadow: inset 3px 0 var(--sr-accent); }
+.sr-session-select { display: block; width: 100%; text-align: left; border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.sr-item-header { justify-content: space-between; margin-bottom: 6px; }
+.sr-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; text-transform: uppercase; background: var(--sr-border); }
 .sr-badge-antigravity { background: #f3e8ff; color: #7e22ce; }
 .sr-badge-claude { background: #ffedd5; color: #c2410c; }
 .sr-badge-grok { background: #e0f2fe; color: #0369a1; }
 .sr-badge-codex { background: #dcfce7; color: #15803d; }
 .sr-badge-dsh { background: #dbeafe; color: #1d4ed8; }
-
-.sr-item-time {
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary, #888);
+.sr-item-title { font-weight: 600; overflow-wrap: anywhere; margin-bottom: 4px; }
+.sr-item-ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-match { display: block; width: 100%; text-align: left; font: inherit; color: inherit; background: var(--sr-bg); border: 1px solid var(--sr-border); border-radius: 6px; padding: 8px 10px; margin-top: 8px; cursor: pointer; overflow-wrap: anywhere; }
+.sr-match:hover { border-color: var(--sr-accent); }
+.sr-match small { display: block; color: var(--sr-muted); margin-bottom: 4px; }
+.sr-overlay mark { background: #ffe399; color: #352b0c; border-radius: 2px; }
+.sr-list-more { padding: 14px 16px; }
+.sr-list-more .sr-btn { width: 100%; }
+.sr-content { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.sr-content-header { border-bottom: 1px solid var(--sr-border); padding: 16px 20px 10px; }
+.sr-header-title-text { margin: 0; flex: 1; min-width: 0; font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-header-actions { flex-wrap: wrap; }
+.sr-header-path { margin-top: 6px; overflow-wrap: anywhere; }
+.sr-reader-toolbar { padding-top: 10px; flex-wrap: wrap; }
+.sr-content-header .sr-header-actions { flex-wrap: wrap; }
+.sr-reader-toolbar .sr-btn { height: 28px; font-size: 12px; }
+.sr-status { min-height: 20px; margin-left: auto; }
+.sr-reading-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.sr-turn-nav { width: 190px; flex: none; overflow: auto; padding: 12px 8px; border-right: 1px solid var(--sr-border); }
+.sr-turn-nav button { font: inherit; display: block; width: 100%; border: 0; color: inherit; text-align: left; background: transparent; border-radius: 6px; padding: 8px; cursor: pointer; overflow-wrap: anywhere; }
+.sr-turn-nav button:hover, .sr-turn-nav button.active { background: var(--sr-surface); color: var(--sr-accent); }
+.sr-turn-nav small { display: block; color: var(--sr-muted); }
+.sr-reading-column { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.sr-dialogue { flex: 1; min-height: 0; overflow: auto; padding: 12px 24px 30px; scroll-behavior: auto; }
+.sr-turn { max-width: 840px; margin: 0 auto 26px; }
+.sr-turn-heading { font-size: 12px; color: var(--sr-muted); padding: 12px 0; border-bottom: 1px solid var(--sr-border); margin-bottom: 18px; }
+.sr-message { margin: 0 0 22px; padding: 12px 14px; border-radius: 8px; border: 1px solid transparent; scroll-margin-top: 12px; }
+.sr-message-user { background: var(--sr-surface); }
+.sr-message.is-target { border-color: var(--sr-accent); }
+.sr-message-header { justify-content: space-between; margin-bottom: 10px; flex-wrap: wrap; }
+.sr-message-header strong { font-size: 12px; }
+.sr-message-header .sr-btn { height: 26px; font-size: 11px; }
+.sr-markdown { overflow-wrap: anywhere; line-height: 1.75; }
+.sr-markdown > :first-child { margin-top: 0; }
+.sr-markdown > :last-child { margin-bottom: 0; }
+.sr-markdown p { white-space: pre-wrap; }
+.sr-markdown pre, .sr-inspection pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--sr-surface); border-radius: 6px; font-size: 12px; }
+.sr-markdown code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+.sr-markdown :not(pre) > code { background: var(--sr-surface); padding: 2px 4px; border-radius: 3px; }
+.sr-markdown a { color: var(--sr-accent); }
+.sr-markdown img { max-width: 100%; }
+.sr-markdown table { display: block; overflow: auto; border-collapse: collapse; }
+.sr-markdown th, .sr-markdown td { border: 1px solid var(--sr-border); padding: 6px 10px; }
+.sr-markdown blockquote { border-left: 3px solid var(--sr-border); padding-left: 12px; margin-left: 0; color: var(--sr-muted); }
+.chat-code-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: var(--sr-surface); font-size: 11px; }
+.chat-code-copy-btn { color: inherit; background: transparent; border: 1px solid var(--sr-border); border-radius: 4px; cursor: pointer; }
+.sr-tools { border-top: 1px solid var(--sr-border); padding-top: 8px; color: var(--sr-muted); font-size: 12px; }
+.sr-tools summary, .sr-detail-panel summary { cursor: pointer; }
+.sr-tool-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.sr-detail-panel { flex: none; width: 290px; border-left: 1px solid var(--sr-border); padding: 16px; overflow: auto; background: var(--sr-surface); }
+.sr-detail-panel details { margin-bottom: 18px; }
+.sr-detail-panel p { font-size: 12px; overflow-wrap: anywhere; }
+.sr-detail-panel .sr-btn { height: auto; min-height: 28px; white-space: normal; text-align: left; margin-top: 6px; max-width: 100%; }
+.sr-inspection { max-height: 45%; flex: none; overflow: auto; padding: 12px 20px; border-bottom: 1px solid var(--sr-border); }
+.sr-inspection .sr-markdown { margin-top: 12px; }
+.sr-inspection strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.sr-empty { margin: auto; padding: 40px 24px; text-align: center; color: var(--sr-muted); }
+.sr-empty strong { display: block; font-size: 16px; color: var(--sr-text); margin-bottom: 8px; }
+.sr-error { color: #dc3655; }
+.sr-standalone.sr-overlay { background: var(--sr-bg); backdrop-filter: none; }
+.sr-standalone .sr-card { width: 100%; height: 100%; border: 0; border-radius: 0; box-shadow: none; }
+.sr-standalone .sr-btn-close { display: none; }
+@media (max-width: 1100px) {
+  .sr-sidebar { width: 290px; }
+  .sr-header-top { align-items: flex-start; flex-wrap: wrap; }
+  .sr-header-hint { display: none; }
+  .sr-turn-nav { width: 150px; }
+  .sr-detail-panel { position: absolute; right: 0; top: 0; bottom: 0; z-index: 2; box-shadow: -8px 0 20px #0001; }
+  .sr-reading-layout { position: relative; }
 }
-.sr-item-title {
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.4;
-  margin-bottom: 4px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.sr-item-ws {
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary, #888);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
-}
-
-/* Detail & Chat Pane */
-.sr-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--dsw-alias-bg-base, #ffffff);
-}
-body[data-ds-dark-theme] .sr-content {
-  background: #1e1e20;
-}
-.sr-content-header {
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-body[data-ds-dark-theme] .sr-content-header {
-  border-color: #333336;
-}
-.sr-header-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  width: 100%;
-}
-.sr-header-title-text {
-  flex: 1;
-  min-width: 0;
-  font-size: 15px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--dsw-alias-label-primary, #111);
-}
-body[data-ds-dark-theme] .sr-header-title-text {
-  color: #fff;
-}
-.sr-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-.sr-header-path {
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary, #888);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  width: 100%;
-}
-.sr-header-provider {
-  font-weight: 600;
-  text-transform: uppercase;
-}
-.sr-tabs {
-  display: flex;
-  gap: 8px;
-}
-.sr-tab-btn {
-  padding: 6px 12px;
-  font-size: 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary, #666);
-}
-.sr-tab-btn.active {
-  background: var(--dsw-alias-interactive-bg-hover, #f3f4f6);
-  color: var(--dsw-alias-label-primary, #111);
-  font-weight: 600;
-}
-body[data-ds-dark-theme] .sr-tab-btn.active {
-  background: #2e2e33;
-  color: #fff;
-}
-.sr-open-dsh-btn {
-  background: var(--dsw-alias-brand-primary, #3b82f6);
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  padding: 6px 14px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  transition: opacity 0.15s ease, transform 0.1s ease;
-  white-space: nowrap;
-}
-.sr-open-dsh-btn:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
-.sr-open-dsh-btn:active {
-  transform: translateY(0);
-}
-.sr-open-dsh-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.sr-scroll-area {
-  flex: 1;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  position: relative;
-}
-.sr-scroll-area-flow {
-  overflow: auto;
-  padding: 16px 18px;
-}
-
-/* Standalone 1session web — full viewport, no DSH chrome */
-.sr-standalone.sr-overlay {
-  background: #f4f5f7;
-  backdrop-filter: none;
-  padding: 0;
-}
-.sr-standalone .sr-card {
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  border-radius: 0;
-  box-shadow: none;
-  border: none;
-}
-.sr-standalone .sr-btn-close,
-.sr-standalone .sr-open-dsh-btn {
-  display: none;
-}
-.sr-file-group {
-  margin-bottom: 18px;
-}
-.sr-file-group-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #666;
-  margin-bottom: 8px;
-}
-.sr-file-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 6px 0;
-  border-bottom: 1px solid rgba(0,0,0,0.06);
-  font-size: 13px;
-}
-.sr-file-turn {
-  flex: none;
-  font-size: 11px;
-  color: #888;
-  min-width: 32px;
-}
-.sr-file-path {
-  flex: 1;
-  min-width: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sr-file-op {
-  flex: none;
-  font-size: 11px;
-  color: #888;
-}
-@media (max-width: 800px) {
-  .sr-header { height: auto; min-height: 56px; flex-wrap: wrap; padding: 8px 12px; }
-  .sr-search-input { min-width: 160px; max-width: none; }
-  .sr-sidebar { width: 30%; min-width: 180px; }
-  .sr-header-top { flex-direction: column; align-items: stretch; }
-  .sr-header-actions { flex-wrap: wrap; }
+@media (max-width: 700px) {
+  .sr-header { padding: 10px; }
+  .sr-sidebar { width: 36%; min-width: 150px; }
+  .sr-content-header { padding: 12px; }
+  .sr-content-header > .sr-header-top { flex-direction: column; align-items: stretch; }
+  .sr-header-title-text { width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .sr-turn-nav { position: absolute; z-index: 2; top: 0; bottom: 0; background: var(--sr-bg); box-shadow: 8px 0 20px #0001; }
+  .sr-dialogue { padding: 10px; }
+  .sr-header-actions .sr-btn { font-size: 11px; }
+  .sr-item-time { font-size: 10px; }
+  .sr-session-item { padding: 10px; }
+  .sr-detail-panel { width: min(290px, 100%); }
 }
 `;
 
@@ -437,7 +214,40 @@ const ICON_SVG = `<svg viewBox="0 0 16 16" width="18" height="18" fill="none" st
 
 export const inject = ['sessions', 'workspaces', 'uiWorkspace', 'locale'];
 
-type SrTab = 'chat' | 'overview' | 'files';
+interface UiSession extends SessionRef {
+  searchMatches?: SearchMatch[];
+  totalMatches?: number;
+  hasMore?: boolean;
+  nextCursor?: string;
+}
+
+interface TurnPage {
+  items: ContentItem[];
+  tools: ReturnType<typeof callsIn>;
+  nextCursor?: string;
+}
+
+interface SessionView {
+  ref: SessionRef;
+  turns: TurnSummary[];
+  loaded: Map<number, TurnPage>;
+  scrollTop: number;
+  currentTurn: number;
+  details?: any;
+  detailsError?: string;
+  continuation?: any;
+  continuationError?: string;
+}
+
+interface Inspection {
+  label: string;
+  params: URLSearchParams;
+  items: ContentItem[];
+  nextCursor?: string;
+  artifactPath?: string;
+  loading: boolean;
+  error?: string;
+}
 
 interface SrUiBoot {
   mode?: string;
@@ -471,11 +281,25 @@ export function apply(_ctx: any = {}) {
 
   // 2. Modal Controller
   let overlayEl: HTMLElement | null = null;
-  let conversation: ReturnType<typeof mountConversation> | undefined;
   let activeSessionId: string | null = null;
-  let cachedSessions: any[] = [];
-  let currentTab: SrTab = 'chat';
-  let activeSessionData: any = null;
+  let cachedSessions: UiSession[] = [];
+  let activeSessionData: SessionView | null = null;
+  const sessionViews = new Map<string, SessionView>();
+  let queryParams = new URLSearchParams();
+  let queryText = '';
+  let listHasMore = false;
+  let listNextCursor: string | undefined;
+  let listNextOffset = 0;
+  let showDirectory = false;
+  let showDetails = false;
+  let inspection: Inspection | null = null;
+  let selectedMatch = -1;
+  let readerBusy = false;
+  let readerError = '';
+  let detailError = '';
+  let readAbort: AbortController | null = null;
+  let inspectionAbort: AbortController | null = null;
+  let detailsAbort: AbortController | null = null;
   let listAbort: AbortController | null = null;
   let detailAbort: AbortController | null = null;
   const LIST_TIMEOUT_MS = 12_000;
@@ -541,7 +365,6 @@ export function apply(_ctx: any = {}) {
   }
 
   function closePanel() {
-    conversation?.unmount(); conversation = undefined;
     listAbort?.abort();
     detailAbort?.abort();
     listAbort = null;
@@ -553,7 +376,17 @@ export function apply(_ctx: any = {}) {
     activeSessionId = null;
     activeSessionData = null;
     cachedSessions = [];
-    currentTab = 'chat';
+    sessionViews.clear();
+    readAbort?.abort();
+    inspectionAbort?.abort();
+    detailsAbort?.abort();
+    readAbort = null;
+    inspectionAbort = null;
+    detailsAbort = null;
+    inspection = null;
+    showDetails = false;
+    showDirectory = false;
+    document.removeEventListener('keydown', onEscape);
   }
 
   async function openInDshChat(sessionId: string, btn?: HTMLElement, provider?: string) {
@@ -583,109 +416,400 @@ export function apply(_ctx: any = {}) {
     }
   }
 
-  async function loadSessionDetail(sessionId: string) {
+  function onEscape(event: KeyboardEvent) {
+    if (event.key === 'Escape' && !isStandalone()) closePanel();
+  }
+
+  function saveReadingPosition() {
+    const pane = overlayEl?.querySelector<HTMLElement>('.sr-dialogue');
+    if (pane && activeSessionData && pane.dataset.session === activeSessionId) {
+      activeSessionData.scrollTop = pane.scrollTop;
+    }
+  }
+
+  async function requestJson(url: string, signal?: AbortSignal) {
+    const response = await fetch(url, { signal, cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
+    return data;
+  }
+
+  async function copyText(value: string, button: HTMLButtonElement) {
+    try {
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch {
+        const field = document.createElement('textarea');
+        field.value = value;
+        field.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        overlayEl!.appendChild(field);
+        field.select();
+        const copied = document.execCommand('copy');
+        field.remove();
+        button.focus();
+        if (!copied) throw new Error('复制失败，请重试');
+      }
+      button.textContent = '已复制';
+      const status = overlayEl?.querySelector('.sr-status');
+      if (status) status.textContent = '引用已复制，可粘贴给 Agent';
+    } catch (error) {
+      const status = overlayEl?.querySelector('.sr-status');
+      if (status) status.textContent = String(error instanceof Error ? error.message : error);
+    }
+  }
+
+  function highlightHtml(value: string): string {
+    if (!queryText) return escapeHtml(value);
+    const lower = value.toLowerCase();
+    const needle = queryText.toLowerCase();
+    let html = '';
+    let offset = 0;
+    let at = lower.indexOf(needle);
+    while (at >= 0) {
+      html += escapeHtml(value.slice(offset, at)) + '<mark>' + escapeHtml(value.slice(at, at + needle.length)) + '</mark>';
+      offset = at + needle.length;
+      at = lower.indexOf(needle, offset);
+    }
+    return html + escapeHtml(value.slice(offset));
+  }
+
+  function markdownBody(text: string): HTMLElement {
+    const body = document.createElement('div');
+    body.className = 'sr-markdown';
+    const template = document.createElement('template');
+    template.innerHTML = renderMarkdown(text);
+    // Session text is untrusted. Keep formatting, never executable markup.
+    const tags = new Set('P BR HR H1 H2 H3 H4 H5 H6 UL OL LI STRONG EM DEL S B I U PRE CODE BLOCKQUOTE TABLE THEAD TBODY TFOOT TR TH TD A IMG DIV SPAN BUTTON INPUT DETAILS SUMMARY MARK'.split(' '));
+    for (const element of Array.from(template.content.querySelectorAll('*'))) {
+      if (!tags.has(element.tagName)) {
+        element.replaceWith(document.createTextNode(element.textContent ?? ''));
+        continue;
+      }
+      for (const attr of Array.from(element.attributes)) {
+        if (!['class', 'href', 'src', 'alt', 'title', 'data-copy', 'type', 'disabled', 'checked', 'start', 'colspan', 'rowspan'].includes(attr.name)) element.removeAttribute(attr.name);
+      }
+      if (element.tagName === 'A') {
+        const href = element.getAttribute('href') ?? '';
+        if (!/^https?:\/\//i.test(href)) element.removeAttribute('href');
+        else {
+          element.setAttribute('target', '_blank');
+          element.setAttribute('rel', 'noopener noreferrer');
+        }
+      }
+      if (element.tagName === 'IMG' && !/^(https?:\/\/|data:image\/(?:png|jpe?g|gif|webp);base64,)/i.test(element.getAttribute('src') ?? '')) element.removeAttribute('src');
+      if (element.tagName === 'INPUT') {
+        element.setAttribute('type', 'checkbox');
+        element.setAttribute('disabled', '');
+      }
+      if (element.tagName === 'BUTTON') element.setAttribute('type', 'button');
+    }
+    body.appendChild(template.content);
+    if (queryText) {
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      const nodes: Text[] = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+      for (const node of nodes) {
+        if (node.parentElement?.closest('button')) continue;
+        const html = highlightHtml(node.data);
+        if (!html.includes('<mark>')) continue;
+        const marked = document.createElement('template');
+        marked.innerHTML = html;
+        node.replaceWith(marked.content);
+      }
+    }
+    body.querySelectorAll<HTMLButtonElement>('button[data-copy]').forEach((button) => {
+      button.addEventListener('click', () => copyText(decodeURIComponent(button.dataset.copy!), button));
+    });
+    return body;
+  }
+
+  function mergeItems(items: ContentItem[], more: ContentItem[]) {
+    for (const item of more) {
+      const existing = items.find((entry) => entry.index === item.index && entry.field === item.field);
+      if (existing) existing.content += item.content;
+      else items.push({ ...item });
+    }
+  }
+
+  function currentMatches(): SearchMatch[] {
+    return cachedSessions.find((session) => sessionKey(session) === activeSessionId)?.searchMatches ?? [];
+  }
+
+  async function loadSessionDetail(sessionId: string, match?: SearchMatch) {
+    saveReadingPosition();
     detailAbort?.abort();
+    readAbort?.abort();
+    inspectionAbort?.abort();
+    detailsAbort?.abort();
     const ac = new AbortController();
     detailAbort = ac;
     const timer = window.setTimeout(() => ac.abort(), DETAIL_TIMEOUT_MS);
-
     activeSessionId = sessionId;
-    activeSessionData = null;
+    activeSessionData = sessionViews.get(sessionId) ?? null;
+    detailError = '';
+    readerError = '';
+    readerBusy = false;
+    inspection = null;
+    selectedMatch = match ? currentMatches().indexOf(match) : -1;
     renderModalBody();
     renderSessionList();
     try {
-      const res = await fetch(`/api/session-reader/session/${encodeURIComponent(sessionId)}`, {
-        signal: ac.signal,
-        cache: 'no-store',
-      });
-      if (!res.ok) {
-        let extra = '';
-        try {
-          const body = await res.json();
-          extra = body?.error ? `: ${body.error}` : '';
-        } catch { /* ignore */ }
-        throw new Error(`HTTP ${res.status}${extra}`);
+      if (!activeSessionData) {
+        const directory = await requestJson('/api/session-reader/session/' + encodeURIComponent(sessionId) + '/directory', ac.signal);
+        if (detailAbort !== ac) return;
+        const view: SessionView = {
+          ref: directory.session, turns: directory.turns, loaded: new Map(),
+          scrollTop: 0, currentTurn: directory.turns[0]?.no ?? 0,
+        };
+        sessionViews.set(sessionId, view);
+        activeSessionData = view;
       }
-      const data = await res.json();
-      if (detailAbort !== ac) return;
-      activeSessionData = data;
       renderModalBody();
-      if (!isStandalone()) {
+      if (match) {
+        if (!match.turn && activeSessionData.loaded.size === 0 && activeSessionData.currentTurn) await loadTurn(activeSessionData.currentTurn);
+        if (detailAbort !== ac) return;
+        await jumpToMatch(match);
+      }
+      else if (activeSessionData.loaded.size === 0 && activeSessionData.currentTurn) await loadTurn(activeSessionData.currentTurn);
+      if (detailAbort !== ac) return;
+      if (showDetails) void loadDetails();
+      if (!isStandalone() && !activeSessionData.continuation) {
         try {
-          const status = await fetch(`/api/session-reader/continuation?provider=${encodeURIComponent(data.ref.provider)}`, { signal: ac.signal, cache: 'no-store' });
-          if (!status.ok) throw new Error(`HTTP ${status.status}`);
-          const continuation = await status.json();
-          if (detailAbort !== ac) return;
-          activeSessionData.continuation = continuation;
+          activeSessionData.continuation = await requestJson('/api/session-reader/continuation?provider=' + encodeURIComponent(activeSessionData.ref.provider), ac.signal);
         } catch (error) {
           if (detailAbort !== ac) return;
           activeSessionData.continuation = { available: false, reason: String(error) };
         }
-      }
-    } catch (err: any) {
-      if (err?.name === 'AbortError') {
-        if (detailAbort === ac) {
-          activeSessionData = { error: '加载超时，请稍后重试或换一个会话' };
-        } else {
-          return;
-        }
-      } else {
         if (detailAbort !== ac) return;
-        activeSessionData = { error: err.message };
+        renderModalBody();
       }
+    } catch (error: any) {
+      if (detailAbort !== ac) return;
+      detailError = error?.name === 'AbortError' ? '加载超时，请重试' : error.message;
+      renderModalBody();
     } finally {
       window.clearTimeout(timer);
     }
-    if (detailAbort !== ac) return;
-    renderModalBody();
   }
 
-  async function fetchSessions(q = '', scope = 'cwd', provider = '') {
-    const listEl = overlayEl?.querySelector('.sr-sidebar');
-    const firstLoad = cachedSessions.length === 0;
-    if (firstLoad && listEl) {
-      listEl.innerHTML = '<div style="padding:20px;text-align:center;color:#888;font-size:12px;">加载会话中...</div>';
+  async function loadTurn(no: number, mode: 'replace' | 'before' | 'after' = 'replace', more = false) {
+    const view = activeSessionData;
+    if (!view) return;
+    saveReadingPosition();
+    readAbort?.abort();
+    const ac = new AbortController();
+    readAbort = ac;
+    const timer = window.setTimeout(() => ac.abort(), DETAIL_TIMEOUT_MS);
+    const pane = overlayEl?.querySelector<HTMLElement>('.sr-dialogue');
+    const height = pane?.scrollHeight ?? 0;
+    const scroll = view.scrollTop;
+    readerBusy = true;
+    readerError = '';
+    if (mode === 'replace' && !more) {
+      view.currentTurn = no;
+      view.scrollTop = 0;
+      const existing = view.loaded.get(no);
+      view.loaded = new Map(existing ? [[no, existing]] : []);
     }
+    renderModalBody(false);
+    try {
+      const params = new URLSearchParams({ turns: String(no) });
+      if (more) params.set('cursor', view.loaded.get(no)!.nextCursor!);
+      if (!view.loaded.has(no) || more) {
+        const page = await requestJson('/api/session-reader/session/' + encodeURIComponent(sessionKey(view.ref)) + '/content?' + params, ac.signal);
+        if (activeSessionData !== view || readAbort !== ac) return;
+        if (more) {
+          const existing = view.loaded.get(no)!;
+          mergeItems(existing.items, page.items);
+          existing.nextCursor = page.nextCursor;
+        } else view.loaded.set(no, { items: page.items, tools: page.tools ?? [], nextCursor: page.nextCursor });
+      }
+      if (activeSessionData !== view || readAbort !== ac) return;
+      readerBusy = false;
+      renderModalBody();
+      const nextPane = overlayEl?.querySelector<HTMLElement>('.sr-dialogue');
+      if (nextPane && mode === 'before') nextPane.scrollTop = scroll + nextPane.scrollHeight - height;
+    } catch (error: any) {
+      if (activeSessionData !== view || readAbort !== ac) return;
+      readerBusy = false;
+      readerError = error?.name === 'AbortError' ? '读取超时，请重试' : error.message;
+      renderModalBody();
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
 
+  async function jumpToMatch(match: SearchMatch) {
+    const view = activeSessionData;
+    if (!view) return;
+    selectedMatch = currentMatches().indexOf(match);
+    const selection = selectedMatch;
+    const navigation = detailAbort;
+    inspection = null;
+    if (match.turn) await loadTurn(match.turn);
+    if (activeSessionData !== view || detailAbort !== navigation || selectedMatch !== selection) return;
+    if (match.kind === 'artifact') {
+      if (match.artifactPath) await inspectContent(new URLSearchParams({ artifact: match.artifactPath }), '产物 · ' + match.artifactPath.split('/').pop(), match.artifactPath);
+    } else if (match.kind === 'tool_call' || match.kind === 'tool_result') {
+      const params = match.callId ? new URLSearchParams({ call: match.callId })
+        : new URLSearchParams({ event: match.locator ?? String(match.index) });
+      await inspectContent(params, '工具记录 · 第 ' + match.turn + ' 轮');
+    } else if (match.kind === 'metadata') {
+      showDetails = true;
+      await loadDetails();
+    } else {
+      const rangeStart = match.fields?.find((field) => field.field === 'text')?.ranges[0]?.[0] ?? 0;
+      let item = view.loaded.get(match.turn)?.items.find((entry) => entry.index === match.index);
+      while (item && item.content.length <= rangeStart && view.loaded.get(match.turn)?.nextCursor) {
+        const length = item.content.length;
+        await loadTurn(match.turn, 'after', true);
+        if (activeSessionData !== view || detailAbort !== navigation || selectedMatch !== selection) return;
+        item = view.loaded.get(match.turn)?.items.find((entry) => entry.index === match.index);
+        if (!item || item.content.length <= length) break;
+      }
+      const element = Array.from(overlayEl?.querySelectorAll<HTMLElement>('.sr-message') ?? [])
+        .find((message) => message.dataset.eventIndex === String(match.index));
+      if (element) {
+        element.classList.add('is-target');
+        (element.querySelector('mark') ?? element).scrollIntoView({ block: 'start' });
+      } else {
+        // A hit can be past the first page of a long turn; read it exactly.
+        await inspectContent(new URLSearchParams({ event: match.locator ?? String(match.index) }), '命中消息 · 第 ' + match.turn + ' 轮');
+      }
+    }
+  }
+
+  async function inspectContent(params: URLSearchParams, label: string, artifactPath?: string, more = false) {
+    const view = activeSessionData;
+    if (!view) return;
+    inspectionAbort?.abort();
+    const ac = new AbortController();
+    inspectionAbort = ac;
+    const timer = window.setTimeout(() => ac.abort(), DETAIL_TIMEOUT_MS);
+    if (!more) inspection = { label, params, items: [], artifactPath, loading: true };
+    const target = inspection!;
+    target.loading = true;
+    target.error = '';
+    const nextParams = new URLSearchParams(params);
+    if (more) nextParams.set('cursor', target.nextCursor!);
+    renderModalBody();
+    try {
+      const page = await requestJson('/api/session-reader/session/' + encodeURIComponent(sessionKey(view.ref)) + '/content?' + nextParams, ac.signal);
+      if (activeSessionData !== view || inspectionAbort !== ac || inspection !== target) return;
+      mergeItems(target.items, page.items);
+      target.nextCursor = page.nextCursor;
+    } catch (error: any) {
+      if (activeSessionData !== view || inspectionAbort !== ac || inspection !== target) return;
+      target.error = error?.name === 'AbortError' ? '读取超时，请重试' : error.message;
+    } finally {
+      window.clearTimeout(timer);
+      if (activeSessionData === view && inspectionAbort === ac) {
+        target.loading = false;
+        renderModalBody();
+      }
+    }
+  }
+
+  async function loadDetails() {
+    const view = activeSessionData;
+    if (!view) return;
+    if (view.details) { renderModalBody(); return; }
+    detailsAbort?.abort();
+    const ac = new AbortController();
+    detailsAbort = ac;
+    const timer = window.setTimeout(() => ac.abort(), DETAIL_TIMEOUT_MS);
+    view.detailsError = '';
+    renderModalBody();
+    try {
+      const data = await requestJson('/api/session-reader/session/' + encodeURIComponent(sessionKey(view.ref)) + '/details', ac.signal);
+      if (activeSessionData !== view || detailsAbort !== ac) return;
+      view.details = data;
+    } catch (error: any) {
+      if (activeSessionData !== view || detailsAbort !== ac) return;
+      view.detailsError = error?.name === 'AbortError' ? '详情加载超时，请重试' : error.message;
+    } finally {
+      window.clearTimeout(timer);
+      if (activeSessionData === view && detailsAbort === ac) renderModalBody();
+    }
+  }
+
+  function searchRow(hit: SearchHit): UiSession {
+    return { ...hit.session, searchMatches: hit.matches, totalMatches: hit.totalMatches, hasMore: hit.hasMore, nextCursor: hit.nextCursor };
+  }
+
+  function mergeSearchRows(rows: UiSession[]) {
+    for (const row of rows) {
+      const existing = cachedSessions.find((session) => sessionKey(session) === sessionKey(row));
+      if (!existing) { cachedSessions.push(row); continue; }
+      const matches = existing.searchMatches ?? [];
+      for (const match of row.searchMatches ?? []) {
+        if (!matches.some((entry) => entry.index === match.index && entry.kind === match.kind && entry.locator === match.locator && entry.artifactPath === match.artifactPath)) matches.push(match);
+      }
+      Object.assign(existing, row, { searchMatches: matches });
+      existing.hasMore = matches.length < (row.totalMatches ?? 0);
+    }
+  }
+
+  async function fetchSessions(append = false, matchSession?: UiSession) {
     listAbort?.abort();
     const ac = new AbortController();
     listAbort = ac;
     const timer = window.setTimeout(() => ac.abort(), LIST_TIMEOUT_MS);
-
+    const listEl = overlayEl?.querySelector('.sr-sidebar');
+    if (!append) {
+      const value = (selector: string) => overlayEl!.querySelector<HTMLInputElement | HTMLSelectElement>(selector)!.value;
+      queryText = value('.sr-search-input').trim();
+      queryParams = new URLSearchParams({ limit: '50', scope: value('.sr-select-scope'), area: value('.sr-select-area') });
+      const workspace = getActiveWorkspaceInfo().cwd;
+      if (queryParams.get('scope') === 'cwd' && workspace) queryParams.set('workspace', workspace);
+      if (value('.sr-select-provider')) queryParams.set('provider', value('.sr-select-provider'));
+      const since = value('.sr-select-since');
+      if (since) queryParams.set('since', new Date(Date.now() - Number(since) * 86400000).toISOString());
+      if (queryText) queryParams.set('q', queryText);
+      selectedMatch = -1;
+    }
+    const params = new URLSearchParams(queryParams);
+    if (append) {
+      if (queryText) params.set('cursor', matchSession?.nextCursor ?? listNextCursor!);
+      else params.set('offset', String(listNextOffset));
+    }
+    if (matchSession) params.set('limit', '1');
+    listEl?.querySelectorAll<HTMLButtonElement>('.sr-load-more, .sr-more-matches').forEach((button) => { button.disabled = true; });
+    if (!append && listEl) listEl.innerHTML = '<div class="sr-empty">正在查找会话…</div>';
     try {
-      const activeWs = getActiveWorkspaceInfo();
-      const params = new URLSearchParams();
-      params.set('limit', '50');
-      params.set('scope', scope);
-      if (scope === 'cwd' && activeWs.cwd) {
-        params.set('workspace', activeWs.cwd);
-      }
-      if (provider) {
-        params.set('provider', provider);
-      }
-      if (q) {
-        params.set('q', q);
-      }
-      const endpoint = q ? '/api/session-reader/search' : '/api/session-reader/sessions';
-      const res = await fetch(`${endpoint}?${params.toString()}`, {
-        signal: ac.signal,
-        cache: 'no-store',
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const endpoint = queryText ? '/search' : '/sessions';
+      const data = await requestJson('/api/session-reader' + endpoint + '?' + params, ac.signal);
       if (listAbort !== ac) return;
-      cachedSessions = data.sessions ?? (data.hits ? data.hits.map((h: any) => ({ ...h.session, searchMatches: h.matches })) : []);
-      if (activeSessionId && !cachedSessions.some((s: any) => `${s.provider}:${s.id}` === activeSessionId)) {
+      const hits: SearchHit[] = (data.hits ?? []).filter((hit: SearchHit) => !hit.self);
+      const rows = data.sessions ?? hits.map(searchRow);
+      if (append) mergeSearchRows(rows);
+      else cachedSessions = rows;
+      if (!matchSession) {
+        listNextCursor = hits.at(-1)?.nextCursor;
+        listNextOffset = data.nextOffset ?? cachedSessions.length;
+        listHasMore = queryText ? Boolean(listNextCursor) : Boolean(data.hasMore);
+      }
+      if (activeSessionId && !cachedSessions.some((session) => sessionKey(session) === activeSessionId)) {
+        saveReadingPosition();
+        detailAbort?.abort(); readAbort?.abort(); inspectionAbort?.abort(); detailsAbort?.abort();
         activeSessionId = null;
         activeSessionData = null;
+        detailError = '';
       }
       renderSessionList();
-      // Lazy: list metadata only. Full parse happens when the user clicks a row.
       renderModalBody();
-    } catch (err: any) {
-      if (err?.name === 'AbortError' && listAbort !== ac) return;
-      const message = err?.name === 'AbortError' ? '加载超时，请缩小范围或稍后重试' : err.message;
-      if (listEl) listEl.innerHTML = `<div style="padding:20px;text-align:center;color:#e11d48;font-size:12px;">加载失败: ${message}</div>`;
+    } catch (error: any) {
+      if (listAbort !== ac) return;
+      renderSessionList();
+      const notice = document.createElement('div');
+      notice.className = 'sr-empty sr-error';
+      notice.textContent = error?.name === 'AbortError' ? '查找超时，请缩小范围后重试' : error.message;
+      const retry = document.createElement('button');
+      retry.className = 'sr-btn';
+      retry.textContent = '重试';
+      retry.addEventListener('click', () => fetchSessions(append, matchSession));
+      notice.appendChild(retry);
+      listEl?.prepend(notice);
     } finally {
       window.clearTimeout(timer);
     }
@@ -694,299 +818,386 @@ export function apply(_ctx: any = {}) {
   function renderSessionList() {
     const listEl = overlayEl?.querySelector('.sr-sidebar');
     if (!listEl) return;
-    if (cachedSessions.length === 0) {
-      listEl.innerHTML = '<div style="padding:30px 16px;text-align:center;color:#888;font-size:12px;line-height:1.6;">当前工作区下暂无匹配的历史会话<br/><span style="font-size:11px;color:#aaa;margin-top:6px;display:inline-block;">可切换上方下拉框选择「全部工作区」查看</span></div>';
+    const scrollTop = listEl.scrollTop;
+    listEl.innerHTML = '<div class="sr-list-heading">' + (queryText ? '匹配会话' : '最近会话') + ' · 已显示 ' + cachedSessions.length + '</div>';
+    if (!cachedSessions.length) {
+      listEl.insertAdjacentHTML('beforeend', '<div class="sr-empty">暂无匹配会话<br>试试调整关键词、时间或工作区</div>');
       return;
     }
-    listEl.innerHTML = '';
-    cachedSessions.forEach((s) => {
+    for (const session of cachedSessions) {
       const item = document.createElement('div');
-      item.className = `sr-session-item ${`${s.provider}:${s.id}` === activeSessionId ? 'active' : ''}`;
-      const badgeClass = `sr-badge sr-badge-${s.provider.toLowerCase().replace(/[^a-z]/g, '')}`;
-      const timeStr = s.updatedAt ? new Date(s.updatedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-      const wsName = s.workspace ? s.workspace.split('/').pop() : '';
-
-      item.innerHTML = `
-        <div class="sr-item-header">
-          <span class="${badgeClass}">${s.provider}</span>
-          <span class="sr-item-time">${timeStr}</span>
-        </div>
-        <div class="sr-item-title" title="${escapeHtml(s.title || '')}">${escapeHtml(s.title || 'Untitled Session')}</div>
-        ${s.searchMatches?.[0] ? `<div class="sr-item-ws">${escapeHtml(s.searchMatches[0].excerpt)}</div>` : ''}
-        <div class="sr-item-ws" title="${escapeHtml(s.workspace || '')}">📁 ${escapeHtml(wsName || s.workspace || '')}</div>
-      `;
-      item.addEventListener('click', () => {
-        overlayEl?.querySelectorAll('.sr-session-item').forEach(el => el.classList.remove('active'));
-        item.classList.add('active');
-        loadSessionDetail(`${s.provider}:${s.id}`);
-      });
-      listEl.appendChild(item);
-    });
-  }
-
-  function renderModalBody() {
-    conversation?.unmount(); conversation = undefined;
-    const contentEl = overlayEl?.querySelector('.sr-content');
-    if (!contentEl) return;
-
-    if (!activeSessionId) {
-      contentEl.innerHTML = `<div style="padding:60px;text-align:center;color:#888;font-size:13px;">请在左侧选择一个会话查看</div>`;
-      return;
-    }
-
-    if (!activeSessionData) {
-      contentEl.innerHTML = `<div style="padding:60px;text-align:center;color:#888;font-size:13px;">正在解析会话事件与结构...</div>`;
-      return;
-    }
-
-    if (activeSessionData.error) {
-      contentEl.innerHTML = `<div style="padding:60px;text-align:center;color:#e11d48;font-size:13px;">加载失败: ${activeSessionData.error}</div>`;
-      return;
-    }
-
-    const { ref, overview, turns, files, continuation, continuationError } = activeSessionData;
-    const copy = getContinuationCopy();
-    const standalone = isStandalone();
-    const body =
-      currentTab === 'chat'
-        ? '<div style="width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;"><div id="sr-chat-root" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;"></div><div id="sr-tools-root" style="max-height:45%;overflow:auto;flex:none;"></div></div>'
-        : currentTab === 'files'
-          ? renderFilesView(files)
-          : renderOverviewView(overview);
-
-    contentEl.innerHTML = `
-      <div class="sr-content-header">
-        <div class="sr-header-top">
-          <div class="sr-header-title-text" title="${escapeHtml(ref.title || 'Untitled')}">
-            ${escapeHtml(ref.title || 'Untitled')}
-          </div>
-          <div class="sr-header-actions">
-            ${standalone ? '' : `<button class="sr-open-dsh-btn" id="sr-btn-open-dsh" ${continuation?.available ? '' : 'disabled'}>
-              ${escapeHtml(continuation?.available ? (ref.provider === 'dsh' ? copy.openDsh : copy.continue) + ' · ' + (continuation.agent || ref.provider) : copy.readOnly)}
-            </button>`}
-            <div class="sr-tabs">
-              <button class="sr-tab-btn ${currentTab === 'chat' ? 'active' : ''}" data-tab="chat">💬 快速预览</button>
-              <button class="sr-tab-btn ${currentTab === 'files' ? 'active' : ''}" data-tab="files">📁 文件 ${Array.isArray(files) ? files.length : ''}</button>
-              <button class="sr-tab-btn ${currentTab === 'overview' ? 'active' : ''}" data-tab="overview">📊 会话概览</button>
-            </div>
-          </div>
-        </div>
-        ${!standalone && (continuationError || !continuation?.available) ? `<div class="sr-header-path" role="status">${escapeHtml(continuationError || continuation?.reason || copy.unavailable)}</div>` : ''}
-        <div class="sr-header-path" title="${escapeHtml(ref.workspace || '')}">
-          <span class="sr-header-provider">${ref.provider}</span> · 工作区: ${escapeHtml(ref.workspace || '未记录')}
-        </div>
-      </div>
-      <div class="sr-scroll-area ${currentTab === 'chat' ? '' : 'sr-scroll-area-flow'}">
-        ${body}
-      </div>
-    `;
-
-    const openDshBtn = contentEl.querySelector('#sr-btn-open-dsh');
-    if (openDshBtn) {
-      openDshBtn.addEventListener('click', () => {
-        openInDshChat(ref.path || activeSessionId!, openDshBtn as HTMLElement, ref.provider);
-      });
-    }
-
-    contentEl.querySelectorAll('.sr-tab-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        currentTab = btn.getAttribute('data-tab') as SrTab;
-        renderModalBody();
-      });
-    });
-
-    if (currentTab === 'chat') {
-      const chatRoot = contentEl.querySelector('#sr-chat-root') as HTMLElement;
-      if (chatRoot) {
-        const items = (turns ?? []).flatMap((turn: any) => (turn.messages ?? []).map((event: any) => ({
-          id: event.locator ?? event.id,
-          kind: event.kind === 'user' ? 'user' : 'assistant_text',
-          content: event.fullText ?? event.text ?? '',
-          createdAt: Number.isFinite(Date.parse(event.timestamp)) ? Date.parse(event.timestamp) : 0,
-          turnId: String(turn.no),
-        })));
-        conversation = mountConversation(chatRoot, {
-          items,
-          cwd: ref.workspace || getActiveWorkspaceInfo().cwd,
-          lang: 'zh-CN',
-          emptyHint: '该会话暂无提取到的轮次记录。',
-        });
-      }
-      const toolsRoot = contentEl.querySelector('#sr-tools-root') as HTMLElement | null;
-      const calls = (turns ?? []).flatMap((turn: any) => (turn.toolCalls ?? []).map((call: any) => ({ ...call, turn: turn.no })));
-      if (toolsRoot && calls.length) {
-        toolsRoot.insertAdjacentHTML('beforeend', `<details style="padding:12px;"><summary>工具调用 ${calls.length} 次</summary></details>`);
-        const list = toolsRoot.lastElementChild!;
-        for (const call of calls) {
-          const row = document.createElement('div');
-          row.style.cssText = 'padding:8px 0;border-bottom:1px solid #8883;';
-          const label = document.createElement('div');
-          label.textContent = `第 ${call.turn} 轮 · ${call.toolName ?? '工具'} · ${call.status === 'completed' ? '已完成' : call.status === 'failed' ? '失败' : '结果未确认'}`;
-          row.appendChild(label);
-          const params = new URLSearchParams({ call: call.id });
+      item.className = 'sr-session-item' + (sessionKey(session) === activeSessionId ? ' active' : '');
+      const time = session.updatedAt ? new Date(session.updatedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '时间未记录';
+      item.innerHTML = '<button type="button" class="sr-session-select">' +
+        '<div class="sr-item-header">' +
+        '<span class="sr-badge sr-badge-' + escapeHtml(session.provider) + '">' + escapeHtml(session.provider) + '</span>' +
+        '<span class="sr-item-time">' + escapeHtml(time) + '</span>' +
+        '</div>' +
+        '<div class="sr-item-title">' + highlightHtml(session.title || '未命名会话') + '</div>' +
+        '<div class="sr-item-ws" title="' + escapeHtml(session.workspace || '') + '">' + escapeHtml(session.workspace?.split('/').pop() || '未记录项目') + '</div>' +
+        '</button>';
+      item.querySelector('button')!.addEventListener('click', () => loadSessionDetail(sessionKey(session), session.searchMatches?.[0]));
+      if (session.searchMatches?.length) {
+        const count = document.createElement('div');
+        count.className = 'sr-message-meta';
+        count.textContent = '命中 ' + session.totalMatches + ' 处 · 已显示 ' + session.searchMatches.length;
+        item.appendChild(count);
+        for (const match of session.searchMatches) {
           const button = document.createElement('button');
-          button.textContent = '查看详情';
-          const output = document.createElement('pre');
-          output.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;';
-          output.hidden = true;
-          let cursor: string | undefined;
-          button.addEventListener('click', async () => {
-            button.disabled = true;
-            try {
-              if (cursor) params.set('cursor', cursor);
-              const response = await fetch(`/api/session-reader/session/${encodeURIComponent(`${ref.provider}:${ref.id}`)}/content?${params}`);
-              const page = await response.json();
-              if (!response.ok) throw new Error(page.error ?? `HTTP ${response.status}`);
-              if (!row.isConnected) return;
-              output.hidden = false;
-              output.textContent += page.items.map((item: any) => `\n${item.field === 'arguments' ? '参数' : '结果'}\n${item.content}${item.truncationNote ? `\n${item.truncationNote}` : ''}`).join('\n');
-              cursor = page.nextCursor;
-              button.textContent = cursor ? '继续加载' : '已显示全部';
-              button.disabled = !cursor;
-            } catch (error: unknown) {
-              output.hidden = false;
-              output.textContent = error instanceof Error ? error.message : String(error);
-              button.disabled = false;
-            }
-          });
-          row.append(button, output);
-          list.appendChild(row);
+          button.className = 'sr-match';
+          const role = match.kind === 'user' ? '用户' : match.kind === 'assistant' ? '助手' : match.kind === 'metadata' ? '标题 / 摘要' : match.kind === 'artifact' ? '产物' : '工具记录';
+          button.innerHTML = '<small>' + (match.turn ? '第 ' + match.turn + ' 轮 · ' : '') + role + '</small>' + highlightHtml(match.excerpt);
+          button.addEventListener('click', () => loadSessionDetail(sessionKey(session), match));
+          item.appendChild(button);
+        }
+        if (session.hasMore) {
+          const button = document.createElement('button');
+          button.className = 'sr-btn sr-more-matches';
+          button.textContent = '更多命中';
+          button.addEventListener('click', () => fetchSessions(true, session));
+          item.appendChild(button);
         }
       }
+      listEl.appendChild(item);
     }
+    if (listHasMore) {
+      const footer = document.createElement('div');
+      footer.className = 'sr-list-more';
+      footer.innerHTML = '<button class="sr-btn sr-load-more">加载更多' + (queryText ? '搜索结果' : '会话') + '</button>';
+      footer.querySelector('button')!.addEventListener('click', () => fetchSessions(true));
+      listEl.appendChild(footer);
+    }
+    listEl.scrollTop = scrollTop;
   }
 
-  function renderFilesView(files: any[] | undefined) {
-    if (!files || files.length === 0) {
-      return `<div style="padding:40px;text-align:center;color:#888;font-size:13px;">该会话没有记录到写入的文件</div>`;
+  function renderMessage(item: ContentItem, ref: SessionRef): HTMLElement {
+    const message = document.createElement('article');
+    message.className = 'sr-message sr-message-' + item.kind;
+    message.dataset.eventIndex = String(item.index);
+    message.dataset.locator = item.locator ?? '';
+    const selected = currentMatches()[selectedMatch];
+    if (selected?.index === item.index && selected.kind === item.kind) message.classList.add('is-target');
+    const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
+    message.innerHTML = '<div class="sr-message-header"><strong>' + (item.kind === 'user' ? '用户' : '助手') + '</strong><span class="sr-message-meta">' + escapeHtml(time) + '</span><button class="sr-btn sr-copy-reference"' + (item.locator ? '' : ' disabled title="此消息缺少定位信息"') + '>复制引用</button></div>';
+    const copy = message.querySelector<HTMLButtonElement>('button')!;
+    copy.addEventListener('click', () => {
+      const range = selected?.index === item.index ? selected.fields?.find((field) => field.field === 'text')?.ranges[0] : undefined;
+      const excerpt = range ? item.content.slice(Math.max(0, range[0] - 100), range[1] + 300) : item.content;
+      void copyText(agentReference(ref, { locator: item.locator, excerpt }), copy);
+    });
+    message.appendChild(markdownBody(item.content));
+    if (item.truncationNote) {
+      const note = document.createElement('p');
+      note.className = 'sr-message-meta';
+      note.textContent = item.truncationNote;
+      message.appendChild(note);
     }
-    const groups: Record<string, any[]> = { project: [], runtime: [], log: [] };
-    for (const file of files) {
-      const group = file.group && groups[file.group] ? file.group : 'runtime';
-      groups[group]!.push(file);
+    return message;
+  }
+
+  function renderModalBody(savePosition = true) {
+    if (savePosition) saveReadingPosition();
+    const content = overlayEl?.querySelector<HTMLElement>('.sr-content');
+    if (!content) return;
+    if (!activeSessionId) {
+      content.innerHTML = '<div class="sr-empty"><strong>找到那次关键讨论</strong>搜索关键词，阅读原文确认后，复制引用交给 Agent。</div>';
+      return;
     }
-    const labels: Record<string, string> = {
-      project: '项目文件',
-      runtime: '运行时 / 工作区外',
-      log: '日志与临时文件',
+    if (detailError) {
+      content.innerHTML = '<div class="sr-empty sr-error">' + escapeHtml(detailError) + '<br><button class="sr-btn">重新加载</button></div>';
+      content.querySelector('button')!.addEventListener('click', () => loadSessionDetail(activeSessionId!));
+      return;
+    }
+    const view = activeSessionData;
+    if (!view) {
+      content.innerHTML = '<div class="sr-empty">正在读取会话目录…</div>';
+      return;
+    }
+    const { ref } = view;
+    const matches = currentMatches();
+    content.innerHTML = '<div class="sr-content-header">' +
+      '<div class="sr-header-top">' +
+      '<h1 class="sr-header-title-text" title="' + escapeHtml(ref.title || '') + '">' + escapeHtml(ref.title || '未命名会话') + '</h1>' +
+      '<div class="sr-header-actions">' +
+      '<button class="sr-btn" id="sr-copy-id">复制会话 ID</button>' +
+      '<button class="sr-btn sr-primary" id="sr-copy-agent">复制引用给 Agent</button>' +
+      '</div>' +
+      '</div>' +
+      '<div class="sr-header-path">' + escapeHtml(ref.provider) + ' · ' + escapeHtml(ref.workspace?.split('/').pop() || '未记录项目') + (ref.createdAt ? ' · ' + new Date(ref.createdAt).toLocaleDateString('zh-CN') : '') + ' · ' + view.turns.length + ' 轮</div>' +
+      '<div class="sr-reader-toolbar">' +
+      '<button class="sr-btn" id="sr-toggle-directory" aria-expanded="' + showDirectory + '">轮次目录</button>' +
+      '<button class="sr-btn" id="sr-toggle-details" aria-expanded="' + showDetails + '">辅助详情</button>' + (matches.length ? '<span class="sr-message-meta">命中 ' + (selectedMatch >= 0 ? selectedMatch + 1 : '—') + ' / ' + matches.length + '</span>' +
+      '<button class="sr-btn" id="sr-prev-match"' + (selectedMatch <= 0 ? ' disabled' : '') + '>上一处</button>' +
+      '<button class="sr-btn" id="sr-next-match"' + (selectedMatch >= matches.length - 1 ? ' disabled' : '') + '>下一处</button>' : '') + '<span class="sr-status" role="status">' + escapeHtml(readerError || (readerBusy ? '正在读取原文…' : '')) + '</span>' +
+      '</div>' +
+      '</div>' +
+      '<div class="sr-reading-layout">' + (showDirectory ? '<nav class="sr-turn-nav" aria-label="轮次目录">' +
+      '</nav>' : '') + '<div class="sr-reading-column">' + (inspection ? '<section class="sr-inspection" aria-label="定位内容">' +
+      '</section>' : '') + '<div class="sr-dialogue" aria-label="对话原文">' +
+      '</div>' +
+      '</div>' + (showDetails ? '<aside class="sr-detail-panel" aria-label="辅助详情">' +
+      '</aside>' : '') + '</div>';
+    const bind = (selector: string, callback: (button: HTMLButtonElement) => void) => {
+      const button = content.querySelector<HTMLButtonElement>(selector);
+      button?.addEventListener('click', () => callback(button));
     };
-    return Object.entries(groups)
-      .filter(([, rows]) => rows.length > 0)
-      .map(
-        ([group, rows]) => `
-        <div class="sr-file-group">
-          <div class="sr-file-group-title">${labels[group] ?? group} · ${rows.length}</div>
-          ${rows
-            .map(
-              (file) => `
-            <div class="sr-file-row">
-              <span class="sr-file-turn">T${file.turn ?? '?'}</span>
-              <span class="sr-file-path" title="${escapeHtml(file.path || '')}">${escapeHtml(file.displayPath || file.path || '')}</span>
-              <span class="sr-file-op">${escapeHtml(file.operation || '')}</span>
-            </div>`,
-            )
-            .join('')}
-        </div>`,
-      )
-      .join('');
+    bind('#sr-copy-id', (button) => copyText(sessionKey(ref), button));
+    bind('#sr-copy-agent', (button) => copyText(agentReference(ref), button));
+    if (!isStandalone()) {
+      const copy = getContinuationCopy();
+      const button = document.createElement('button');
+      button.className = 'sr-btn';
+      button.id = 'sr-continue-dsh';
+      button.disabled = !view.continuation?.available;
+      button.textContent = ref.provider === 'dsh' ? copy.openDsh : copy.continue;
+      button.addEventListener('click', () => openInDshChat(ref.path || sessionKey(ref), button, ref.provider));
+      content.querySelector('#sr-copy-agent')!.after(button);
+      const reason = view.continuationError || view.continuation?.reason;
+      if (reason) {
+        button.title = reason;
+        const notice = document.createElement('p');
+        notice.className = view.continuationError ? 'sr-message-meta sr-error' : 'sr-message-meta';
+        notice.textContent = reason;
+        content.querySelector('.sr-content-header')!.appendChild(notice);
+      }
+    }
+    bind('#sr-toggle-directory', () => { showDirectory = !showDirectory; renderModalBody(); });
+    bind('#sr-toggle-details', () => { showDetails = !showDetails; renderModalBody(); if (showDetails) void loadDetails(); });
+    bind('#sr-prev-match', () => jumpToMatch(matches[selectedMatch - 1]!));
+    bind('#sr-next-match', () => jumpToMatch(matches[selectedMatch + 1]!));
+    const nav = content.querySelector('.sr-turn-nav');
+    for (const turn of view.turns) {
+      if (!nav) break;
+      const button = document.createElement('button');
+      button.className = turn.no === view.currentTurn ? 'active' : '';
+      button.innerHTML = '<small>第 ' + turn.no + ' 轮</small>' + escapeHtml(turn.prompt.slice(0, 90) || '未记录请求');
+      button.addEventListener('click', () => { inspection = null; selectedMatch = -1; void loadTurn(turn.no); });
+      nav.appendChild(button);
+    }
+    const pane = content.querySelector<HTMLElement>('.sr-dialogue')!;
+    pane.dataset.session = sessionKey(ref);
+    const loaded = [...view.loaded.keys()].sort((a, b) => a - b);
+    const pageButton = (label: string, callback: () => void) => {
+      const button = document.createElement('button');
+      button.className = 'sr-btn';
+      button.textContent = label;
+      button.disabled = readerBusy;
+      button.addEventListener('click', callback);
+      return button;
+    };
+    const first = view.turns.findIndex((turn) => turn.no === loaded[0]);
+    const last = view.turns.findIndex((turn) => turn.no === loaded.at(-1));
+    if (first > 0) pane.appendChild(pageButton('加载前一轮', () => loadTurn(view.turns[first - 1]!.no, 'before')));
+    for (const no of loaded) {
+      const page = view.loaded.get(no)!;
+      const summary = view.turns.find((turn) => turn.no === no)!;
+      const turn = document.createElement('section');
+      turn.className = 'sr-turn';
+      turn.dataset.turn = String(no);
+      turn.innerHTML = '<div class="sr-turn-heading">第 ' + no + ' 轮' + (summary.startedAt ? ' · ' + new Date(summary.startedAt).toLocaleString('zh-CN') : '') + '</div>';
+      for (const item of page.items) turn.appendChild(renderMessage(item, ref));
+      if (page.nextCursor) turn.appendChild(pageButton('继续读取本轮原文', () => loadTurn(no, 'after', true)));
+      if (page.tools.length) {
+        const tools = document.createElement('details');
+        tools.className = 'sr-tools';
+        tools.innerHTML = '<summary>工具记录 · ' + page.tools.length + ' 次</summary>';
+        for (const call of page.tools) {
+          const row = document.createElement('div');
+          row.className = 'sr-tool-row';
+          const label = document.createElement('span');
+          label.textContent = (call.toolName ?? '工具') + ' · ' + (call.status === 'failed' ? '失败' : call.status === 'completed' ? '已完成' : '结果未确认');
+          row.appendChild(label);
+          row.appendChild(pageButton('查看记录', () => inspectContent(new URLSearchParams({ call: call.id }), '工具 · ' + (call.toolName ?? '未命名'))));
+          tools.appendChild(row);
+        }
+        turn.appendChild(tools);
+      }
+      pane.appendChild(turn);
+    }
+    if (last >= 0 && last < view.turns.length - 1) pane.appendChild(pageButton('加载后一轮', () => loadTurn(view.turns[last + 1]!.no, 'after')));
+    if (!loaded.length && !readerBusy) {
+      pane.innerHTML = '<div class="sr-empty">' + (view.turns.length ? '尚未读取原文' : '此会话未记录可见对话') + '</div>';
+      if (view.turns.length) pane.appendChild(pageButton('读取对话', () => loadTurn(view.currentTurn)));
+    }
+    if (readerError && view.currentTurn) pane.appendChild(pageButton('重试读取当前轮次', () => loadTurn(view.currentTurn)));
+    pane.scrollTop = view.scrollTop;
+    pane.addEventListener('scroll', () => { view.scrollTop = pane.scrollTop; }, { passive: true });
+    if (inspection) renderInspection(content.querySelector('.sr-inspection')!, inspection, ref);
+    if (showDetails) renderDetails(content.querySelector('.sr-detail-panel')!, view);
   }
 
-  function renderOverviewView(overview: any) {
-    if (!overview) return '<div style="color:#888;">暂无概览数据</div>';
-    const stats = overview.stats || {};
-    return `
-      <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
-        <div style="background:rgba(0,0,0,0.03);border-radius:8px;padding:10px 14px;border:1px solid var(--dsw-alias-border-l1, #e5e7eb);font-size:12px;">
-          <div style="color:#888;">总轮次</div>
-          <div style="font-size:16px;font-weight:600;margin-top:2px;">${stats.turns ?? 0}</div>
-        </div>
-        <div style="background:rgba(0,0,0,0.03);border-radius:8px;padding:10px 14px;border:1px solid var(--dsw-alias-border-l1, #e5e7eb);font-size:12px;">
-          <div style="color:#888;">改动文件</div>
-          <div style="font-size:16px;font-weight:600;margin-top:2px;">${stats.fileChanges ?? 0}</div>
-        </div>
-        <div style="background:rgba(0,0,0,0.03);border-radius:8px;padding:10px 14px;border:1px solid var(--dsw-alias-border-l1, #e5e7eb);font-size:12px;">
-          <div style="color:#888;">执行命令</div>
-          <div style="font-size:16px;font-weight:600;margin-top:2px;">${stats.commands ?? 0}</div>
-        </div>
-        <div style="background:rgba(0,0,0,0.03);border-radius:8px;padding:10px 14px;border:1px solid var(--dsw-alias-border-l1, #e5e7eb);font-size:12px;">
-          <div style="color:#888;">后台任务</div>
-          <div style="font-size:16px;font-weight:600;margin-top:2px;">${stats.backgroundTasks ?? 0}</div>
-        </div>
-      </div>
-      <div style="margin-top:16px;">
-        ${renderMarkdown(overview.markdown || '')}
-      </div>
-    `;
+  function renderInspection(container: Element, target: Inspection, ref: SessionRef) {
+    container.innerHTML = '<div class="sr-header-top"><strong>' + escapeHtml(target.label) + '</strong><div class="sr-header-actions"><button class="sr-btn sr-inspect-copy">复制引用</button><button class="sr-btn sr-inspect-close">收起</button></div></div>';
+    const button = container.querySelector<HTMLButtonElement>('.sr-inspect-copy')!;
+    button.disabled = !target.items.length && !target.artifactPath;
+    button.addEventListener('click', () => copyText(agentReference(ref, {
+      artifactPath: target.artifactPath, locator: target.items[0]?.locator,
+      callId: target.items[0]?.callId, excerpt: target.items.map((item) => item.content).join('\n'),
+    }), button));
+    container.querySelector('.sr-inspect-close')!.addEventListener('click', () => { inspectionAbort?.abort(); inspection = null; renderModalBody(); });
+    if (!target.items.length) {
+      const note = document.createElement('p');
+      note.textContent = target.error || (target.loading ? '正在读取定位内容…' : '未记录可读文本');
+      container.appendChild(note);
+    }
+    for (const item of target.items) {
+      if (item.field === 'text' && item.kind !== 'tool_result') container.appendChild(markdownBody(item.content));
+      else {
+        const pre = document.createElement('pre');
+        pre.textContent = (item.field === 'arguments' ? '参数\n' : item.field === 'result' ? '结果\n' : '') + item.content;
+        container.appendChild(pre);
+      }
+      if (item.truncationNote) {
+        const note = document.createElement('p');
+        note.textContent = item.truncationNote;
+        container.appendChild(note);
+      }
+    }
+    if (target.nextCursor || target.error) {
+      const more = document.createElement('button');
+      more.className = 'sr-btn';
+      more.textContent = target.nextCursor ? '继续读取' : '重试';
+      more.disabled = target.loading;
+      more.addEventListener('click', () => inspectContent(target.params, target.label, target.artifactPath, Boolean(target.nextCursor)));
+      container.appendChild(more);
+    }
+  }
+
+  function renderDetails(container: Element, view: SessionView) {
+    const { ref } = view;
+    const stats = view.details?.overview?.stats;
+    container.innerHTML = '<details open>' +
+      '<summary>会话信息</summary>' +
+      '<p>会话 ID<br>' + escapeHtml(sessionKey(ref)) + '</p>' +
+      '<p>项目路径<br>' + escapeHtml(ref.workspace || '未记录') + '</p>' +
+      '<p>创建：' + escapeHtml(ref.createdAt || '未记录') + '<br>更新：' + escapeHtml(ref.updatedAt || '未记录') + '</p>' + (ref.summary ? '<div class="sr-saved-summary">' +
+      '</div>' : '') + (stats ? '<p>' + stats.turns + ' 轮 · ' + stats.filesChanged + ' 个文件 · ' + stats.commands + ' 条命令<br>模型：' + escapeHtml(stats.models?.join('、') || '未记录') + '<br>分支：' + escapeHtml(stats.branches?.join('、') || '未记录') + '</p>' : '<p>正在读取辅助详情…</p>') + '</details>' +
+      '<details class="sr-file-details">' +
+      '<summary>文件记录</summary>' +
+      '</details>' +
+      '<details class="sr-artifact-details">' +
+      '<summary>产物</summary>' +
+      '</details>';
+    if (ref.summary) container.querySelector('.sr-saved-summary')!.appendChild(markdownBody(ref.summary));
+    const info = container.querySelector('details')!;
+    for (const title of ref.titles ?? []) {
+      const label = document.createElement('p');
+      label.innerHTML = '<span class="sr-message-meta">已保存标题 · ' + escapeHtml(title.source) + '</span><br>' + highlightHtml(title.text);
+      info.appendChild(label);
+    }
+    if (view.detailsError) {
+      const notice = document.createElement('p');
+      notice.className = 'sr-error';
+      notice.textContent = view.detailsError;
+      const retry = document.createElement('button');
+      retry.className = 'sr-btn';
+      retry.textContent = '重试加载详情';
+      retry.addEventListener('click', () => loadDetails());
+      info.append(notice, retry);
+    }
+    const files = container.querySelector('.sr-file-details')!;
+    for (const file of view.details?.files ?? []) {
+      const button = document.createElement('button');
+      button.className = 'sr-btn';
+      button.textContent = 'T' + file.turn + ' · ' + (file.displayPath || file.path);
+      button.title = file.operation + ' · ' + file.path;
+      button.addEventListener('click', async () => {
+        selectedMatch = -1;
+        await loadTurn(file.turn);
+        if (activeSessionData !== view) return;
+        await inspectContent(new URLSearchParams({ event: String(file.eventIndex) }), '文件操作 · ' + file.path);
+      });
+      files.appendChild(button);
+    }
+    const artifacts = container.querySelector('.sr-artifact-details')!;
+    for (const artifact of stats?.artifacts ?? []) {
+      const button = document.createElement('button');
+      button.className = 'sr-btn';
+      button.textContent = artifact.name;
+      button.addEventListener('click', () => inspectContent(new URLSearchParams({ artifact: artifact.path }), '产物 · ' + artifact.name, artifact.path));
+      artifacts.appendChild(button);
+    }
+    if (view.details && !(view.details.files?.length)) files.insertAdjacentHTML('beforeend', '<p>未记录文件写入</p>');
+    if (stats && !stats.artifacts?.length) artifacts.insertAdjacentHTML('beforeend', '<p>未记录产物</p>');
   }
 
   function openPanel() {
     if (overlayEl) return;
     const activeWs = getActiveWorkspaceInfo();
-    const wsDisplay = activeWs.title || (activeWs.cwd ? activeWs.cwd.split('/').pop() : '') || '当前';
-
+    const wsDisplay = activeWs.title || activeWs.cwd?.split('/').pop() || '当前';
     overlayEl = document.createElement('div');
-    overlayEl.className = isStandalone() ? 'sr-overlay sr-standalone' : 'sr-overlay';
-    overlayEl.innerHTML = `
-      <div class="sr-card">
-        <div class="sr-header">
-          <div class="sr-header-title">
-            ${ICON_SVG}
-            <span>历史会话 · Session Reader</span>
-          </div>
-          <input type="text" class="sr-search-input" placeholder="搜索会话关键词、文件名、报错..." />
-          <select class="sr-select sr-select-scope">
-            <option value="cwd">当前工作区 (${escapeHtml(wsDisplay)})</option>
-            <option value="global">全部工作区</option>
-          </select>
-          <select class="sr-select sr-select-provider">
-            <option value="">全部 Agent</option>
-            <option value="antigravity">Antigravity</option>
-            <option value="claude">Claude Code</option>
-            <option value="grok">Grok</option>
-            <option value="codex">Codex</option>
-            <option value="dsh">DSH</option>
-          </select>
-          <button class="sr-btn sr-btn-refresh">刷新</button>
-          <button class="sr-btn sr-btn-close">✕</button>
-        </div>
-        <div class="sr-main">
-          <div class="sr-sidebar"></div>
-          <div class="sr-content"></div>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlayEl);
-
-    overlayEl.querySelector('.sr-btn-close')?.addEventListener('click', closePanel);
+    overlayEl.className = 'sr-overlay' + (isStandalone() ? ' sr-standalone' : '');
     if (!isStandalone()) {
-      overlayEl.addEventListener('click', (e) => {
-        if (e.target === overlayEl) closePanel();
-      });
+      overlayEl.setAttribute('role', 'dialog');
+      overlayEl.setAttribute('aria-modal', 'true');
+      overlayEl.setAttribute('aria-label', '历史会话');
     }
-
-    const searchInput = overlayEl.querySelector('.sr-search-input') as HTMLInputElement;
-    const scopeSelect = overlayEl.querySelector('.sr-select-scope') as HTMLSelectElement;
-    const providerSelect = overlayEl.querySelector('.sr-select-provider') as HTMLSelectElement;
-    const refreshBtn = overlayEl.querySelector('.sr-btn-refresh') as HTMLButtonElement;
-
+    overlayEl.innerHTML = '<div class="sr-card">' +
+      '<header class="sr-header">' +
+      '<div class="sr-header-top">' +
+      '<div class="sr-header-title">' + ICON_SVG + '<span>历史会话 · Session Reader</span>' +
+      '</div>' +
+      '<span class="sr-header-hint">找到关键对话，确认后交给 Agent</span>' +
+      '<button class="sr-btn sr-btn-close" aria-label="关闭">✕</button>' +
+      '</div>' +
+      '<div class="sr-search-row">' +
+      '<input type="search" class="sr-search-input" aria-label="搜索关键词" placeholder="搜索对话中的关键词…" />' +
+      '<button class="sr-btn sr-primary sr-btn-search">搜索</button>' +
+      '<select class="sr-select sr-select-scope" aria-label="工作区">' +
+      '<option value="cwd">当前工作区 (' + escapeHtml(wsDisplay) + ')</option>' +
+      '<option value="global">全部工作区</option>' +
+      '</select>' +
+      '<select class="sr-select sr-select-provider" aria-label="Agent 来源">' +
+      '<option value="">全部 Agent</option>' +
+      '<option value="antigravity">Antigravity</option>' +
+      '<option value="claude">Claude Code</option>' +
+      '<option value="grok">Grok</option>' +
+      '<option value="codex">Codex</option>' +
+      '<option value="dsh">DSH</option>' +
+      '</select>' +
+      '<select class="sr-select sr-select-since" aria-label="更新时间">' +
+      '<option value="">全部时间</option>' +
+      '<option value="1">最近一天</option>' +
+      '<option value="7">最近一周</option>' +
+      '<option value="30">最近一月</option>' +
+      '</select>' +
+      '<select class="sr-select sr-select-area" aria-label="搜索范围">' +
+      '<option value="dialogue">对话 / 标题</option>' +
+      '<option value="tools">工具记录</option>' +
+      '<option value="artifacts">产物</option>' +
+      '<option value="all">全部内容</option>' +
+      '</select>' +
+      '<button class="sr-btn sr-btn-refresh">刷新</button>' +
+      '</div>' +
+      '</header>' +
+      '<div class="sr-main">' +
+      '<aside class="sr-sidebar" aria-label="候选会话">' +
+      '</aside>' +
+      '<main class="sr-content">' +
+      '</main>' +
+      '</div>' +
+      '</div>';
+    document.body.appendChild(overlayEl);
+    overlayEl.querySelector('.sr-btn-close')!.addEventListener('click', closePanel);
+    if (!isStandalone()) overlayEl.addEventListener('click', (event) => { if (event.target === overlayEl) closePanel(); });
+    document.addEventListener('keydown', onEscape);
     const doQuery = () => {
-      fetchSessions(searchInput.value.trim(), scopeSelect.value, providerSelect.value);
+      const area = overlayEl!.querySelector<HTMLSelectElement>('.sr-select-area')!.value;
+      const hints: Record<string, string> = {
+        dialogue: '搜索对话中的关键词…', tools: '搜索工具名、参数或结果…',
+        artifacts: '搜索产物名称或内容…', all: '搜索对话、工具和产物…',
+      };
+      overlayEl!.querySelector<HTMLInputElement>('.sr-search-input')!.placeholder = hints[area]!;
+      void fetchSessions();
     };
-
-    searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') doQuery();
-    });
-    scopeSelect.addEventListener('change', doQuery);
-    providerSelect.addEventListener('change', doQuery);
-    refreshBtn.addEventListener('click', doQuery);
-
-    if (getBoot().defaultScope === 'global') {
-      scopeSelect.value = 'global';
-    }
-
+    overlayEl.querySelector('.sr-search-input')!.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') doQuery(); });
+    overlayEl.querySelector('.sr-search-input')!.addEventListener('search', doQuery);
+    overlayEl.querySelectorAll('select').forEach((select) => select.addEventListener('change', doQuery));
+    overlayEl.querySelector('.sr-btn-search')!.addEventListener('click', doQuery);
+    overlayEl.querySelector('.sr-btn-refresh')!.addEventListener('click', doQuery);
+    if (getBoot().defaultScope === 'global') overlayEl.querySelector<HTMLSelectElement>('.sr-select-scope')!.value = 'global';
     renderModalBody();
-    fetchSessions();
+    doQuery();
   }
 
   if (isStandalone()) {

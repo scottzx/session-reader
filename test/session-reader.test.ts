@@ -682,6 +682,7 @@ test('buildOverview reports session-level stats from a real session', async (t) 
   const resolved = await resolveSession(ref.id);
   assert.ok(resolved);
   const session = await resolved.adapter.parse(resolved.candidate);
+  if (!session.turns.length) return t.skip('session has no turns');
   const overview = buildOverview(session);
 
   assert.equal(overview.session.id, ref.id);

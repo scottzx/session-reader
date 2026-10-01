@@ -1,4 +1,4 @@
-import { readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../reader.js';
+import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../reader.js';
 import { callsIn } from '../calls.js';
 import type { ServerResponse } from 'node:http';
 import {
@@ -59,14 +59,12 @@ export function previewTurns(normalized: NormalizedSession) {
   });
 }
 
-export async function sessionPreview(sessionId: string) {
-  const normalized = await loadSession(sessionId, { useIndex: true });
+function sessionDetailsOf(normalized: NormalizedSession) {
   const workspace = normalized.ref.workspace;
   return {
     ref: normalized.ref,
     stats: normalized.stats,
     overview: buildOverview(normalized),
-    turns: previewTurns(normalized),
     files: fileLedger(normalized).map((record) => ({
       ...record,
       displayPath: displayPath(record, workspace),
@@ -74,21 +72,31 @@ export async function sessionPreview(sessionId: string) {
   };
 }
 
+export async function sessionPreview(sessionId: string) {
+  const normalized = await loadSession(sessionId, { useIndex: true });
+  return { ...sessionDetailsOf(normalized), turns: previewTurns(normalized) };
+}
+
 export async function listSessionsForUi(options: {
   limit?: number;
+  offset?: number;
   provider?: string;
   since?: string;
   workspace?: string;
 }) {
   const limit = options.limit ?? 50;
-  return listRecentSessions({
-    limit,
+  const offset = options.offset ?? 0;
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('offset must be a non-negative integer');
+  const sessions = await listRecentSessions({
+    limit: offset + limit,
     provider: options.provider as AgentProvider | undefined,
     since: options.since,
     workspace: options.workspace,
     useIndex: false,
-    scan: Math.min(Math.max(limit * 4, 80), 200),
+    scan: Infinity,
   });
+  return sessions.slice(offset);
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -110,6 +118,11 @@ export async function handleSessionApi(
 ): Promise<boolean> {
   if (pathname === '/sessions' || pathname === '' || pathname === '/') {
     const limit = url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : 50;
+    const offset = Number(url.searchParams.get('offset') ?? 0);
+    if (!Number.isSafeInteger(limit) || limit < 1 || !Number.isSafeInteger(offset) || offset < 0) {
+      sendJson(res, 400, { error: 'limit must be positive; offset must be non-negative integers' });
+      return true;
+    }
     const scope = url.searchParams.get('scope');
     const provider = url.searchParams.get('provider') || undefined;
     const since = url.searchParams.get('since') ?? undefined;
@@ -118,8 +131,9 @@ export async function handleSessionApi(
       url.searchParams.get('workspace'),
       options.fallbackCwd,
     );
-    const sessions = await listSessionsForUi({ limit, provider, since, workspace });
-    sendJson(res, 200, { sessions });
+    const sessions = await listSessionsForUi({ limit: limit + 1, offset, provider, since, workspace });
+    sendJson(res, 200, { sessions: sessions.slice(0, limit), hasMore: sessions.length > limit,
+      ...(sessions.length > limit ? { nextOffset: offset + limit } : {}) });
     return true;
   }
 
@@ -141,6 +155,19 @@ export async function handleSessionApi(
       cursor: url.searchParams.get('cursor') ?? undefined,
     });
     sendJson(res, 200, { hits });
+    return true;
+  }
+
+  const matchDirectory = pathname.match(/^\/session\/([^/]+)\/directory$/);
+  if (matchDirectory) {
+    sendJson(res, 200, await readTurnDirectory(decodeURIComponent(matchDirectory[1]!)));
+    return true;
+  }
+
+  const matchDetails = pathname.match(/^\/session\/([^/]+)\/details$/);
+  if (matchDetails) {
+    const normalized = await loadSession(decodeURIComponent(matchDetails[1]!), { useIndex: true });
+    sendJson(res, 200, sessionDetailsOf(normalized));
     return true;
   }
 
