@@ -7,6 +7,7 @@ export interface Availability { available: boolean; agent?: string; reason?: str
 interface OpenResult {
   success: true; dshSessionId: string; workspace?: string; workspaceId?: string;
   agent?: string; continuation: 'native' | 'dsh';
+  writable?: boolean; blocked?: 'active-writer';
 }
 interface AcpSessions {
   availability(provider: string): Promise<Availability>;
@@ -27,7 +28,7 @@ export async function continuationAvailability(ctx: OpenContext, ref: Pick<Sessi
   return service.availability(ref.provider);
 }
 
-/** Open DSH's original identity or import native history through oneagentsAcpSessions; errors are never returned as success. */
+/** Open DSH's original identity or attach native history; ACP separately reports writing availability. */
 export async function openSessionInDsh(ctx: OpenContext, request: OpenRequest): Promise<OpenResult> {
   const resolved = await resolveSession(request.sessionId, request.provider);
   if (!resolved) throw new Error(`Session not found: ${request.sessionId}`);

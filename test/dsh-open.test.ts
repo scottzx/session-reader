@@ -23,14 +23,17 @@ test('tool and HTTP admission share the ACP service and retain the native provid
   let route: any;
   const service = {
     availability: async () => ({ available: true, agent: 'codex' }),
-    importSession: async (value: any) => { calls.push(value); return { success: true, continuation: 'native' as const, dshSessionId: 'session-imported' }; },
+    importSession: async (value: any) => { calls.push(value); return { success: true, continuation: 'native' as const, dshSessionId: 'session-imported', writable: false, blocked: 'active-writer' as const }; },
   };
   apply({ get: () => service, effect: (setup: any) => effects.push(setup()), tools: { register: (tool: any) => { tools.set(tool.name, tool); return () => tools.delete(tool.name); } }, webServer: { register: (value: any) => { route = value; return () => {}; } } });
   const first = await tools.get('session_open_in_dsh').execute({ sessionId: 'same-native-id', provider: 'codex' });
   assert.equal(first.dshSessionId, 'session-imported');
+  assert.equal(first.writable, false);
+  assert.equal(first.blocked, 'active-writer');
   const request = Object.assign(Readable.from([JSON.stringify({ sessionId: 'same-native-id', provider: 'codex' })]), { url: '/api/session-reader/open-in-dsh', method: 'POST', headers: { host: 'localhost', origin: 'http://localhost' } });
   const response = { statusCode: 200, body: '', setHeader() {}, end(value: string) { this.body = value; } };
   await route.handler(request, response);
+  assert.equal(response.statusCode, 200);
   assert.deepEqual(JSON.parse(response.body), first);
   assert.equal(calls.length, 2);
   assert.ok(calls.every(c => c.provider === 'codex' && c.nativeSessionId === 'same-native-id' && c.cwd === '/original/workspace'));

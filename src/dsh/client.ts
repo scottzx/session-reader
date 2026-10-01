@@ -2,6 +2,7 @@
 import { renderMarkdown } from '@1agents/chat-ui';
 import { continuationCopy, continuationDictionaries } from './copy.js';
 import { agentReference, sessionKey } from '../web/references.js';
+import { selectedWorkspace } from './workspace.js';
 import type { SessionRef, TurnSummary } from '../types.js';
 import type { SearchMatch, SearchHit } from '../search.js';
 import type { ContentItem } from '../reader.js';
@@ -212,7 +213,7 @@ body[data-ds-dark-theme] .sr-overlay {
 
 const ICON_SVG = `<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><polyline points="8 4.2 8 8 10.5 9.5"/></svg>`;
 
-export const inject = ['sessions', 'workspaces', 'uiWorkspace', 'locale'];
+export const inject = ['sessions', 'workspaces', 'uiWorkspace', 'uiSession', 'locale'];
 
 interface UiSession extends SessionRef {
   searchMatches?: SearchMatch[];
@@ -237,6 +238,7 @@ interface SessionView {
   detailsError?: string;
   continuation?: any;
   continuationError?: string;
+  continuationBusy?: boolean;
 }
 
 interface Inspection {
@@ -302,6 +304,7 @@ export function apply(_ctx: any = {}) {
   let detailsAbort: AbortController | null = null;
   let listAbort: AbortController | null = null;
   let detailAbort: AbortController | null = null;
+  let activeWorkspaceKey = '';
   const LIST_TIMEOUT_MS = 12_000;
   const DETAIL_TIMEOUT_MS = 60_000;
 
@@ -321,43 +324,11 @@ export function apply(_ctx: any = {}) {
     try {
       const sessions = dshCtx?.get ? (dshCtx.get('sessions') ?? dshCtx.sessions) : dshCtx?.sessions;
       const sessionSnapshot = sessions?.list?.getSnapshot?.();
-      const currentSessionId = sessionSnapshot?.current;
-      const sessionCwd = currentSessionId ? sessionSnapshot?.byId?.[currentSessionId]?.cwd : undefined;
-
+      const uiSession = dshCtx?.get ? dshCtx.get('uiSession') : dshCtx?.uiSession;
+      const currentSessionId = uiSession?.adapter?.current?.getSnapshot?.().key;
       const workspaces = dshCtx?.get ? (dshCtx.get('workspaces') ?? dshCtx.workspaces) : dshCtx?.workspaces;
       const wsSnapshot = workspaces?.list?.getSnapshot?.();
-      const items = wsSnapshot?.items || [];
-
-      // 1. If current session is active, find its workspace
-      if (currentSessionId) {
-        const matched = items.find((w: any) => w.sessionIds?.includes(currentSessionId));
-        if (matched) {
-          return {
-            cwd: matched.path,
-            title: matched.title || matched.path.split('/').pop() || '当前工作区',
-            workspaceId: matched.workspaceId,
-          };
-        }
-      }
-
-      // 2. If current session has cwd directly
-      if (sessionCwd) {
-        const matched = items.find((w: any) => w.path === sessionCwd);
-        return {
-          cwd: sessionCwd,
-          title: matched?.title || sessionCwd.split('/').pop() || '当前工作区',
-          workspaceId: matched?.workspaceId,
-        };
-      }
-
-      // 3. Fallback: first workspace in items
-      if (items.length > 0) {
-        return {
-          cwd: items[0].path,
-          title: items[0].title || items[0].path.split('/').pop() || '当前工作区',
-          workspaceId: items[0].workspaceId,
-        };
-      }
+      return selectedWorkspace(currentSessionId, sessionSnapshot?.byId ?? {}, wsSnapshot?.items ?? []);
     } catch (err) {
       console.warn('[session-reader] getActiveWorkspaceInfo error:', err);
     }
@@ -389,10 +360,13 @@ export function apply(_ctx: any = {}) {
     document.removeEventListener('keydown', onEscape);
   }
 
-  async function openInDshChat(sessionId: string, btn?: HTMLElement, provider?: string) {
+  async function openInDshChat(sessionId: string, provider?: string) {
     const copy = getContinuationCopy();
-    const label = btn?.textContent;
-    if (btn) { btn.textContent = copy.loading; (btn as HTMLButtonElement).disabled = true; }
+    const view = activeSessionData;
+    if (!view || view.continuationBusy) return;
+    view.continuationBusy = true;
+    view.continuationError = undefined;
+    renderModalBody();
     try {
       const res = await fetch('/api/session-reader/open-in-dsh', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -407,12 +381,13 @@ export function apply(_ctx: any = {}) {
       navigation.openSession(result.dshSessionId);
       closePanel();
     } catch (err: any) {
-      if (activeSessionData) {
-        activeSessionData.continuationError = copy.failed + (err?.message || err);
+      view.continuationError = copy.failed + (err?.message || err);
+      if (activeSessionData === view) {
         renderModalBody();
       }
     } finally {
-      if (btn) { btn.textContent = label ?? copy.continue; (btn as HTMLButtonElement).disabled = false; }
+      view.continuationBusy = false;
+      if (activeSessionData === view) renderModalBody();
     }
   }
 
@@ -761,6 +736,19 @@ export function apply(_ctx: any = {}) {
       queryText = value('.sr-search-input').trim();
       queryParams = new URLSearchParams({ limit: '50', scope: value('.sr-select-scope'), area: value('.sr-select-area') });
       const workspace = getActiveWorkspaceInfo().cwd;
+      if (queryParams.get('scope') === 'cwd' && !workspace) {
+        cachedSessions = [];
+        listHasMore = false;
+        detailAbort?.abort(); readAbort?.abort(); inspectionAbort?.abort(); detailsAbort?.abort();
+        activeSessionId = null;
+        activeSessionData = null;
+        inspection = null;
+        detailError = '';
+        renderModalBody();
+        listEl!.innerHTML = '<div class="sr-empty">请先在 DSH 中选择工作区，或切换为全部工作区。</div>';
+        window.clearTimeout(timer);
+        return;
+      }
       if (queryParams.get('scope') === 'cwd' && workspace) queryParams.set('workspace', workspace);
       if (value('.sr-select-provider')) queryParams.set('provider', value('.sr-select-provider'));
       const since = value('.sr-select-since');
@@ -948,9 +936,9 @@ export function apply(_ctx: any = {}) {
       const button = document.createElement('button');
       button.className = 'sr-btn';
       button.id = 'sr-continue-dsh';
-      button.disabled = !view.continuation?.available;
-      button.textContent = ref.provider === 'dsh' ? copy.openDsh : copy.continue;
-      button.addEventListener('click', () => openInDshChat(ref.path || sessionKey(ref), button, ref.provider));
+      button.disabled = !view.continuation?.available || Boolean(view.continuationBusy);
+      button.textContent = view.continuationBusy ? copy.loading : ref.provider === 'dsh' ? copy.openDsh : copy.continue;
+      button.addEventListener('click', () => openInDshChat(ref.path || sessionKey(ref), ref.provider));
       content.querySelector('#sr-copy-agent')!.after(button);
       const reason = view.continuationError || view.continuation?.reason;
       if (reason) {
@@ -1124,6 +1112,7 @@ export function apply(_ctx: any = {}) {
   function openPanel() {
     if (overlayEl) return;
     const activeWs = getActiveWorkspaceInfo();
+    activeWorkspaceKey = JSON.stringify(activeWs);
     const wsDisplay = activeWs.title || activeWs.cwd?.split('/').pop() || '当前';
     overlayEl = document.createElement('div');
     overlayEl.className = 'sr-overlay' + (isStandalone() ? ' sr-standalone' : '');
@@ -1198,6 +1187,29 @@ export function apply(_ctx: any = {}) {
     if (getBoot().defaultScope === 'global') overlayEl.querySelector<HTMLSelectElement>('.sr-select-scope')!.value = 'global';
     renderModalBody();
     doQuery();
+  }
+
+  function syncWorkspace() {
+    if (!overlayEl) return;
+    const workspace = getActiveWorkspaceInfo();
+    const key = JSON.stringify(workspace);
+    if (key === activeWorkspaceKey) return;
+    activeWorkspaceKey = key;
+    const scope = overlayEl.querySelector<HTMLSelectElement>('.sr-select-scope')!;
+    scope.querySelector('option[value="cwd"]')!.textContent = '当前工作区 (' + (workspace.title || '未选择') + ')';
+    if (scope.value === 'cwd') void fetchSessions();
+  }
+
+  if (!isStandalone()) {
+    _ctx.effect(() => {
+      const sources = [
+        _ctx.get('uiSession').adapter.current,
+        _ctx.get('sessions').list,
+        _ctx.get('workspaces').list,
+      ];
+      const disposers = sources.map(source => source.subscribe(syncWorkspace));
+      return () => { disposers.forEach(dispose => dispose()); closePanel(); };
+    });
   }
 
   if (isStandalone()) {

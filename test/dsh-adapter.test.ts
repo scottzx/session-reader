@@ -221,7 +221,7 @@ test('DSH browser client bundle registers with ModuleLoader exactly once and exp
 
   assert.equal(loadCallCount, 1, 'Materialization must NOT call load a second time (no duplicate registration)');
   assert.equal(typeof materialized.apply, 'function', 'Materialized exports must have apply function');
-  assert.deepEqual(materialized.inject, ['sessions', 'workspaces', 'uiWorkspace', 'locale'], 'Materialized exports must declare inject');
+  assert.deepEqual(materialized.inject, ['sessions', 'workspaces', 'uiWorkspace', 'uiSession', 'locale'], 'Materialized exports must declare inject');
 });
 
 

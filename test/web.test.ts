@@ -9,7 +9,22 @@ import { adapters } from '../src/resolver.js';
 import { claudeAdapter } from '../src/parsers/claude.js';
 import { listSessionsForUi } from '../src/web/api.js';
 import { agentReference, sessionKey } from '../src/web/references.js';
+import { selectedWorkspace } from '../src/dsh/workspace.js';
 import { resetStoreCache, openStore } from '../src/store/db.js';
+
+test('DSH workspace follows the selected session and its latest cwd, not catalog order', () => {
+  const items = [
+    { path: '/first', workspaceId: 'first', sessionIds: ['one'] },
+    { path: '/selected', title: 'Selected', workspaceId: 'selected', sessionIds: ['two'] },
+  ];
+  assert.deepEqual(selectedWorkspace('two', { two: { cwd: '/selected' } }, items), {
+    cwd: '/selected', title: 'Selected', workspaceId: 'selected',
+  });
+  assert.equal(selectedWorkspace('two', { two: { cwd: '/changed' } }, items).cwd, '/changed');
+  assert.equal(selectedWorkspace('two', {}, items).cwd, '/selected');
+  assert.deepEqual(selectedWorkspace(undefined, {}, items), {});
+  assert.deepEqual(selectedWorkspace('unknown', {}, items), {});
+});
 
 test('agent references retain provider, exact message locator, and safe CLI quoting', () => {
   const ref = { id: 'native-session', provider: 'claude' as const, path: '/tmp/session.jsonl', title: '检索讨论' };
