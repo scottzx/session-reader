@@ -1,8 +1,25 @@
 # @1agents/session-reader
 
-**Read Plane（读平面）** —— 跨智能体会话的发现、逐轮解析、按 `pwd` 聚合与蒸馏。
+**在 DSH Web 中查看跨智能体历史，也可作为独立 `1session` CLI 与 TypeScript 库使用。**
 
-读平面与执行平面解耦：不依赖任何常驻守护进程、不写库、不改会话，**以本地原始会话文件为唯一准绳**，纯 Node.js 标准库（`fs/promises`、`path`、`os`、`readline`、`zlib`）实现。
+支持 Claude Code、Codex、Antigravity、Grok 和 DeepSeek Harness：发现会话、搜索原文、逐轮查看，并按工作目录聚合。**Read Plane（读平面）以本地原始会话文件为唯一准绳，不修改原始会话**；本地 SQLite 索引用于加速检索，可从源文件重建。只读浏览不依赖 ACP 服务或常驻守护进程。
+
+## DSH Web 快速安装
+
+要求 Node.js >= 22.15，并已安装 DeepSeek Harness。在终端运行：
+
+```bash
+dsh plugin --profile web add @1agents/session-reader
+dsh web
+```
+
+包内的 `dsh.bundle.patch` 会在安装时启用插件。已经运行 DSH Web 时，安装或升级后重启服务，再打开侧栏「历史会话」。从 DSH 源码仓库运行时，在以上命令前加 `pnpm`；使用其他 profile 时将 `web` 替换为对应名称。
+
+![DSH Web 中的 session-reader 历史会话浏览器](https://raw.githubusercontent.com/scottzx/session-reader/main/docs/screenshots/session-reader-dsh.png)
+
+截图使用独立测试 profile 中的合成示例会话。[拍摄环境与验证范围](docs/screenshots/README.md)。
+
+五种来源均可只读浏览。要在 DSH 中**继续 Claude、Codex、Grok 的原生会话**，还需安装可选的 `@1agents/acp-service`，配置对应 Agent 的 CLI 与登录状态，并保留原工作目录；DSH 来源打开原 DSH 会话，Antigravity 目前仅供浏览。详细条件见[在 DSH 中继续原会话](#在-dsh-中继续原会话)。
 
 ## 覆盖的智能体
 
@@ -38,8 +55,7 @@ npx @1agents/session-reader list      # 不安装直接用
 ```
 
 要求 Node.js >= 22.15（`node:sqlite` 建索引，`node:zlib` 的 zstd 读 dsh 的压缩会话；zstd 是 22.15 才进 `node:zlib` 的）。
-唯一的运行时依赖是自家的 [`@1agents/dreammate-network`](https://github.com/scottzx/dreammate-network)
-——L0 协议定义，12 kB，本身零依赖——`npm install` 会自动带上，不需要单独装。
+运行时依赖为 `@1agents/chat-ui`、`@1agents/dreammate-network`、`@1agents/dreammate-node` 和 `preact`，由包管理器自动安装。解析与索引使用 Node.js 文件、压缩及 SQLite API；不需要另装数据库服务。
 
 ## 内置 skill：一条命令装到五家智能体
 
@@ -527,10 +543,10 @@ $ 1session graph ca8325e1
 从 npm 安装到 DSH Web profile（包内声明了 `dsh.bundle.patch`，安装后自动启用）：
 
 ```sh
-pnpm dsh plugin --profile web add @1agents/session-reader @1agents/acp-service
+dsh plugin --profile web add @1agents/session-reader
 ```
 
-只查看历史时可只安装 `@1agents/session-reader`；插件按请求查询 ACP 服务，不把 ACP 注册为加载依赖。已安装独立 `dsh` 命令时省略开头的 `pnpm`；桌面版将 profile 改为 `desktop`。更新包后重启对应的 DSH 服务。使用统一包 `@1agents/acp-service@>=0.5.0` 时，插件默认自动启动或复用本地 ACP 服务，无需另开终端；远程地址或 `serviceMode: external` 仍由外部管理。具体配置见 [ACP 插件说明](https://github.com/scottzx/1acp/tree/main/packages/dsh-plugin)。
+只查看历史时安装 `@1agents/session-reader` 即可；插件按请求查询 ACP 服务，不把 ACP 注册为加载依赖。从 DSH 源码仓库运行时在命令前加 `pnpm`；桌面版将 profile 改为 `desktop`。更新包后重启对应的 DSH 服务。需要续聊时另运行 `dsh plugin --profile web add @1agents/acp-service`。使用统一包 `@1agents/acp-service@>=0.5.0` 时，插件默认自动启动或复用本地 ACP 服务，无需另开终端；远程地址或 `serviceMode: external` 仍由外部管理。具体配置见 [ACP 插件说明](https://github.com/scottzx/1acp/tree/main/packages/dsh-plugin)。
 
 DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。入口沿用「插件」「自动化任务」的主文字色、字号、行高、圆角、悬停与键盘焦点样式；展开时使用 16px 图标，折叠时使用 18px 图标和 36px 按钮，颜色跟随 DSH 的亮暗主题。
 
@@ -668,7 +684,16 @@ npm run typecheck
 npm 包为 `@1agents/session-reader`，由 GitHub Actions 发布，本地不手工 `npm publish`：
 
 - `.github/workflows/ci.yml` —— push 到 `main` 与 PR 上跑 `typecheck` / `test` / `build` / `npm pack --dry-run`。
-- `.github/workflows/release.yml` —— 手动触发（Actions → Release → Run workflow），输入 `patch` / `minor` / `major` / `prerelease` 或具体版本号。流程：跑测试 → `npm version` 打版本提交与 tag → `npm publish`（带 provenance）→ 推送 commit 与 tag → 创建 GitHub Release。
+- `.github/workflows/release.yml` —— 手动触发（Actions → Release → Run workflow），输入 `patch` / `minor` / `major` / `prerelease` 或具体版本号。流程：跑测试 → `npm version` 打版本提交与 tag → `npm publish`（带 provenance）→ 推送 commit 与 tag → 从 npm 下载同一精确版本的 tarball、校验 registry 的 SHA-512 integrity → 创建带 `.tgz` 和 `SHA256SUMS` 附件的 GitHub Release。
+
+安装兜底：从 [GitHub Releases](https://github.com/scottzx/session-reader/releases) 选择带附件的版本，下载 `session-reader-<version>.tgz` 与 `SHA256SUMS`，校验后安装：
+
+```bash
+shasum -a 256 -c SHA256SUMS
+dsh plugin --profile web add ./session-reader-<version>.tgz
+```
+
+将 `<version>` 替换为所下载的版本；旧 Release 可能没有附件，应使用 npm 安装。附件使用 npm 已发布的同一份字节，不以 GitHub 自动生成的源码归档代替可安装包。
 
 发布顺序是先 publish 再 push：npm 发布失败时远端不会留下悬空的版本提交和 tag，直接重跑即可。
 

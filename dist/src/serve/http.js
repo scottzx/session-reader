@@ -1,0 +1,234 @@
+import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../reader.js';
+/**
+ * `1session serve` — session-reader 作为 DreamMate Network 的第一个标准 Service。
+ *
+ * 它把本地 Read Plane 原样暴露成网络能力：`1session overview <id>` 成为
+ * `sessions.read`。**不重新实现索引与事实层**，只是换一个调用入口。
+ *
+ * HTTP 层不引第三方框架，只用 node:http；端口与协议类型来自 L0 包。
+ */
+import http from 'node:http';
+import { listRecentSessions, loadSession } from '../resolver.js';
+import { buildOverview } from '../overview.js';
+import { searchSessions } from '../search.js';
+import { canonicalizePath } from '../util/paths.js';
+import { buildManifest, nodeIdentity, sessionUri } from './node.js';
+import { DEFAULT_PORTS } from '@1agents/dreammate-network';
+import { reportAndHoldRegistration } from '@1agents/dreammate-node/client';
+import { SESSION_CAPABILITIES } from './node.js';
+/** 约定端口，由 L0 协议包定义——Control Plane 的 pull 探测照着它找服务。 */
+export const DEFAULT_PORT = DEFAULT_PORTS['session-registry'];
+const json = (res, status, body) => {
+    const payload = JSON.stringify(body, null, 2);
+    res.writeHead(status, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(payload),
+    });
+    res.end(payload);
+};
+const q = (ctx, name) => ctx.url.searchParams.get(name) ?? undefined;
+const qn = (ctx, name) => {
+    const raw = q(ctx, name);
+    if (raw === undefined)
+        return undefined;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : undefined;
+};
+/**
+ * `?scope=` is a path whose subtree is included; omitting it means the whole
+ * machine. The CLI defaults to the cwd instead, which is meaningless for a
+ * long-running server.
+ */
+const scopeOf = (ctx) => {
+    const scope = q(ctx, 'scope');
+    return scope && scope !== 'global' ? canonicalizePath(scope) : undefined;
+};
+/** Records `caller --references--> target` while the read is happening. */
+async function noteRead(verb, target, caller) {
+    if (!caller)
+        return;
+    try {
+        const { openStore } = await import('../store/db.js');
+        const { captureRuntimeEdge } = await import('../store/edges.js');
+        captureRuntimeEdge(await openStore(), verb, target, caller);
+    }
+    catch {
+        // An edge is a nice-to-have; never fail the read over it.
+    }
+}
+async function route(ctx) {
+    const { pathname } = ctx.url;
+    const identity = await nodeIdentity();
+    if (pathname === '/health') {
+        return { status: 200, body: { status: 'ok', node_id: identity.node_id, service: 'session-registry' } };
+    }
+    // 只报本服务自己——节点全貌在本机 agent 的 :36908/manifest。
+    if (pathname === '/manifest') {
+        return { status: 200, body: await buildManifest(ctx.url.origin) };
+    }
+    if (pathname === '/v1/sessions') {
+        const refs = await listRecentSessions({
+            limit: qn(ctx, 'limit') ?? 20,
+            workspace: scopeOf(ctx),
+            since: q(ctx, 'since'),
+            provider: q(ctx, 'provider'),
+            useIndex: true,
+        });
+        return {
+            status: 200,
+            body: {
+                node: identity.name,
+                sessions: refs.map((ref) => ({ ...ref, uri: sessionUri(identity.name, ref.provider, ref.id) })),
+            },
+        };
+    }
+    const content = /^\/v1\/sessions\/([^/]+)\/content$/.exec(pathname);
+    if (content) {
+        const id = decodeURIComponent(content[1]);
+        const options = { cursor: q(ctx, 'cursor'), maxChars: q(ctx, 'maxChars') === undefined ? undefined : Number(q(ctx, 'maxChars')) };
+        if (q(ctx, 'raw') === 'true' && !q(ctx, 'event'))
+            throw new Error('raw requires event');
+        const body = q(ctx, 'call') ? await readCall(id, q(ctx, 'call'), options)
+            : q(ctx, 'artifact') ? await readArtifact(id, q(ctx, 'artifact'), options)
+                : q(ctx, 'event') ? await (q(ctx, 'raw') === 'true' ? readOriginalRecords : readEvents)(id, ctx.url.searchParams.getAll('event'), options)
+                    : await readTurns(id, q(ctx, 'turns') ?? '1', options);
+        await noteRead('turns', id, ctx.caller);
+        return { status: 200, body };
+    }
+    const detail = /^\/v1\/sessions\/([^/]+)(\/turns)?$/.exec(pathname);
+    if (detail) {
+        const id = decodeURIComponent(detail[1]);
+        const wantTurns = detail[2] !== undefined;
+        if (wantTurns) {
+            const directory = await readTurnDirectory(id);
+            await noteRead('turns', id, ctx.caller);
+            return { status: 200, body: { uri: sessionUri(identity.name, directory.session.provider, directory.session.id), turns: directory.turns } };
+        }
+        const session = await loadSession(id, { useIndex: true });
+        await noteRead(wantTurns ? 'turns' : 'overview', id, ctx.caller);
+        const uri = sessionUri(identity.name, session.ref.provider, session.ref.id);
+        return { status: 200, body: { uri, ...buildOverview(session) } };
+    }
+    if (pathname === '/v1/search') {
+        const query = q(ctx, 'q') ?? q(ctx, 'query');
+        if (!query)
+            return { status: 400, body: { error: 'missing ?q=' } };
+        const hits = await searchSessions(query, {
+            workspace: scopeOf(ctx),
+            since: q(ctx, 'since'),
+            limit: qn(ctx, 'limit'),
+            provider: q(ctx, 'provider'),
+            kinds: q(ctx, 'kind')?.split(',').map((k) => k.trim()).filter(Boolean),
+            regex: q(ctx, 'regex') === 'true',
+            caseSensitive: q(ctx, 'case') === 'true',
+            context: qn(ctx, 'context'),
+            maxPerSession: qn(ctx, 'max-hits'),
+            area: q(ctx, 'area'), sessionId: q(ctx, 'session'),
+            terms: ctx.url.searchParams.getAll('term').length ? ctx.url.searchParams.getAll('term') : undefined,
+            operator: q(ctx, 'operator'), sort: q(ctx, 'sort'), cursor: q(ctx, 'cursor'),
+            useIndex: true,
+        });
+        return {
+            status: 200,
+            body: {
+                query,
+                total: hits.reduce((sum, hit) => sum + hit.totalMatches, 0),
+                hits: hits.map((hit) => ({
+                    ...hit,
+                    uri: sessionUri(identity.name, hit.session.provider, hit.session.id),
+                })),
+            },
+        };
+    }
+    const graph = /^\/v1\/graph\/([^/]+)$/.exec(pathname);
+    if (graph) {
+        const id = decodeURIComponent(graph[1]);
+        const { openStore } = await import('../store/db.js');
+        const { edgeEvidence, edgesOf } = await import('../store/edges.js');
+        const { findSessionRow } = await import('../store/read.js');
+        await loadSession(id, { useIndex: true }); // make sure it is indexed first
+        await noteRead('graph', id, ctx.caller);
+        const db = await openStore();
+        const row = findSessionRow(db, id);
+        if (!row)
+            return { status: 404, body: { error: `session not found: ${id}` } };
+        const edges = edgesOf(db, row.id).map((edge) => ({
+            ...edge,
+            evidence: edgeEvidence(db, edge.from, edge.to, edge.relation),
+        }));
+        return { status: 200, body: { session: row.id, edges } };
+    }
+    return { status: 404, body: { error: `no route: ${pathname}` } };
+}
+export function createServer(options = {}) {
+    return http.createServer((req, res) => {
+        void (async () => {
+            try {
+                if (req.method !== 'GET' && req.method !== 'HEAD') {
+                    return json(res, 405, { error: 'read-only service: GET only' });
+                }
+                const url = new URL(req.url ?? '/', options.baseUrl ?? `http://${req.headers.host ?? 'localhost'}`);
+                if (options.token) {
+                    const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
+                    if (bearer !== options.token)
+                        return json(res, 401, { error: 'unauthorized' });
+                }
+                const caller = req.headers['x-caller-session'];
+                const { status, body } = await route({
+                    url,
+                    caller: typeof caller === 'string' ? caller : undefined,
+                });
+                json(res, status, body);
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                // A bad session id reads as "not found", not as a server fault.
+                json(res, /not found|missing|no session/i.test(message) ? 404 : 500, { error: message });
+            }
+        })();
+    });
+}
+export async function serve(options = {}) {
+    const host = options.host ?? '127.0.0.1';
+    const server = createServer(options);
+    // 请求的端口。实际绑定到哪个从 server.address() 读——传 0 时它是随机的。
+    const wanted = options.port ?? DEFAULT_PORT;
+    // 端口占用是最常见的启动失败，默认会抛一整屏 Node 栈——对着栈猜"是不是
+    // 已经起了一个"没意义，直接说清楚怎么办。
+    await new Promise((resolve, reject) => {
+        server.once('error', (error) => {
+            reject(error.code === 'EADDRINUSE'
+                ? new Error(`端口 ${wanted} 已被占用。换一个：--port <n>；或先停掉占用它的进程：` +
+                    `lsof -nP -iTCP:${wanted} -sTCP:LISTEN`)
+                : error);
+        });
+        server.listen(wanted, host, resolve);
+    });
+    const { port } = server.address();
+    const identity = await nodeIdentity();
+    // 只听回环的服务，外部发现得了却连不上——如实说，别让调用方白跑一趟。
+    const reachability = host === '127.0.0.1' || host === 'localhost' || host === '::1' ? 'localhost' : 'network';
+    const reported = options.report === false
+        ? undefined
+        : await reportAndHoldRegistration({
+            id: 'session-registry',
+            name: 'session-reader',
+            kind: 'session_registry',
+            capabilities: [...SESSION_CAPABILITIES],
+            port,
+            reachability,
+            resources: [{ scheme: 'session' }],
+        });
+    console.log(`1session serve — node ${identity.name} (${identity.node_id})`);
+    console.log(`  http://${host}:${port}/manifest`);
+    console.log(`  capabilities: sessions.list, sessions.read, sessions.turns, sessions.search, sessions.graph`);
+    if (reported) {
+        console.log(reported.ok
+            ? `  已向本机 node agent 报备（reachability=${reachability}）`
+            : `  未报备：${reported.reason}——不影响本服务，只是外部得靠约定端口找它`);
+    }
+    if (host !== '127.0.0.1' && host !== 'localhost' && !options.token) {
+        console.warn(`  ⚠️  绑定在 ${host} 且未设置 --token：会话原文（代码、shell 历史、密钥）将对该网络开放。`);
+    }
+    return server;
+}

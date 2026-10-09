@@ -8,6 +8,8 @@
     "antigravity",
     "grok",
     "deepseek",
+    "dsh-plugin",
+    "deepseek-harness",
     "session",
     "transcript",
     "jsonl",
@@ -58,16 +60,20 @@
   },
   "files": [
     "dist",
-    "skills",
+    "skills/1session/SKILL.md",
+    "skills/1session/references",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "screenshots.json",
+    "docs/screenshots"
   ],
   "publishConfig": {
     "access": "public",
     "provenance": true
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/bundle-client.js",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node scripts/bundle-client.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/session-reader.test.ts test/dsh-adapter.test.ts test/dsh-open.test.ts test/web.test.ts test/retrieval.test.ts test/dsh-format.test.ts",
     "prepack": "npm run build",

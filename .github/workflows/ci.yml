@@ -21,5 +21,14 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      - name: Verify committed build
+        run: |
+          git diff --exit-code -- dist
+          untracked_build=$(git ls-files --others --exclude-standard -- dist)
+          if [ -n "$untracked_build" ]; then
+            printf '%s\n' "$untracked_build"
+            exit 1
+          fi
+
       - name: Inspect publishable tarball
         run: npm pack --dry-run

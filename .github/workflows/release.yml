@@ -50,7 +50,35 @@ jobs:
       - name: Push commit and tag
         run: git push --follow-tags origin HEAD:${{ github.ref_name }}
 
+      - name: Download and verify the published npm artifact
+        run: |
+          mkdir -p release-assets
+          package_spec=$(node -p 'const p = require("./package.json"); `${p.name}@${p.version}`')
+          for attempt in 1 2 3 4 5; do
+            if npm view "$package_spec" dist --json --registry=https://registry.npmjs.org > release-assets/npm-dist.json; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then exit 1; fi
+            sleep 3
+          done
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFile, writeFile } from 'node:fs/promises';
+          const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+          const dist = JSON.parse(await readFile('release-assets/npm-dist.json', 'utf8'));
+          const response = await fetch(dist.tarball);
+          if (!response.ok) throw new Error(`npm tarball download failed: ${response.status}`);
+          const tarball = Buffer.from(await response.arrayBuffer());
+          const integrity = `sha512-${createHash('sha512').update(tarball).digest('base64')}`;
+          if (integrity !== dist.integrity) throw new Error('npm tarball integrity mismatch');
+          const filename = `session-reader-${pkg.version}.tgz`;
+          await writeFile(`release-assets/${filename}`, tarball);
+          const sha256 = createHash('sha256').update(tarball).digest('hex');
+          await writeFile('release-assets/SHA256SUMS', `${sha256}  ${filename}\n`);
+          console.log(`Verified ${pkg.name}@${pkg.version}: ${sha256}`);
+          NODE
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ steps.bump.outputs.version }}" --generate-notes
+        run: gh release create "${{ steps.bump.outputs.version }}" release-assets/*.tgz release-assets/SHA256SUMS --generate-notes --verify-tag

@@ -16,6 +16,7 @@ const browserBuild = {
   bundle: true,
   platform: 'browser',
   target: ['es2022'],
+  minify: true,
   loader: { '.ts': 'ts' },
   define: {
     'process.env.NODE_ENV': '"production"',
