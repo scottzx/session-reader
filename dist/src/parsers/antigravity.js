@@ -1,0 +1,386 @@
+import { auxiliaryFingerprint } from '../util/fingerprint.js';
+import { sourceEvents, existingTitles } from './source.js';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { readJsonl } from '../util/jsonl.js';
+import { canonicalizePath, findRepoRoot } from '../util/paths.js';
+import { importSqlite } from '../util/sqlite.js';
+import { clip, oneLine, stripPromptEnvelope } from '../util/text.js';
+import { emptyProviderStats, } from '../types.js';
+const BRAIN_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+/** The IDE's own project↔session mapping: one SQLite file per conversation. */
+const CONVERSATIONS_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'conversations');
+const TRANSCRIPTS = ['transcript.jsonl', 'transcript_full.jsonl'];
+/** Args whose value is an absolute path we can use to locate the repository. */
+const PATH_ARGS = ['AbsolutePath', 'DirectoryPath', 'SearchPath', 'TargetFile', 'FilePath'];
+/** Antigravity prints the exit status and a timestamp pair into the result text. */
+const EXIT_CODE = /The command exited with code (\d+)/;
+const TIME_PAIR = /Created At:\s*(\S+)\s*\nCompleted At:\s*(\S+)/;
+const IMAGE_EXT = /\.(?:png|jpe?g|gif|webp|svg)$/i;
+const TEXT_EXT = /\.(?:md|txt|json|csv)$/i;
+function artifactKind(name) {
+    if (IMAGE_EXT.test(name))
+        return 'image';
+    return /\.md$/i.test(name) ? 'markdown' : 'other';
+}
+/** Background jobs: `tasks/task-N.log` is the output, `messages/` the receipts. */
+async function readTasks(systemDir) {
+    const tasks = new Map();
+    for (const name of await fs.readdir(path.join(systemDir, 'tasks')).catch(() => [])) {
+        const id = name.replace(/\.log$/, '');
+        tasks.set(id, { id, log: path.join(systemDir, 'tasks', name), finished: false });
+    }
+    for (const name of await fs.readdir(path.join(systemDir, 'messages')).catch(() => [])) {
+        const file = path.join(systemDir, 'messages', name);
+        const notice = await fs
+            .readFile(file, 'utf8')
+            .then((raw) => JSON.parse(raw))
+            .catch(() => undefined);
+        if (!notice?.sender)
+            continue;
+        const id = notice.sender.split('/').pop() ?? notice.sender;
+        const existing = tasks.get(id) ?? { id, finished: false };
+        const title = notice.renderDetails?.messageTitle;
+        // A notice only exists once the job has reported back.
+        tasks.set(id, { ...existing, finished: true, ...(title === undefined ? {} : { title }) });
+    }
+    return [...tasks.values()];
+}
+async function readUploads(sessionDir) {
+    const uploads = [];
+    for (const dir of ['.user_uploaded', '.tempmediaStorage']) {
+        const full = path.join(sessionDir, dir);
+        for (const name of await fs.readdir(full).catch(() => [])) {
+            if (name.startsWith('.'))
+                continue;
+            const stat = await fs.stat(path.join(full, name)).catch(() => undefined);
+            uploads.push({
+                name,
+                path: path.join(full, name),
+                ...(stat ? { sizeBytes: stat.size } : {}),
+            });
+        }
+    }
+    return uploads;
+}
+/** Antigravity double-encodes every tool argument as a JSON string. */
+function unwrapArgs(args) {
+    const out = {};
+    for (const [key, raw] of Object.entries(args ?? {})) {
+        if (typeof raw === 'string') {
+            try {
+                out[key] = JSON.parse(raw);
+                continue;
+            }
+            catch {
+                /* plain string */
+            }
+        }
+        out[key] = raw;
+    }
+    return out;
+}
+/** One protobuf varint: its value and the offset just past it. */
+function varint(buf, at) {
+    let value = 0;
+    let shift = 0;
+    let i = at;
+    while (i < buf.length) {
+        const byte = buf[i++];
+        value += (byte & 0x7f) * 2 ** shift;
+        shift += 7;
+        if (!(byte & 0x80))
+            break;
+    }
+    return [value, i];
+}
+/** The bytes of the first length-delimited field `no`, or nothing. */
+function protoField(buf, no) {
+    let i = 0;
+    while (i < buf.length) {
+        const [key, afterKey] = varint(buf, i);
+        const wire = key & 7;
+        if (wire === 2) {
+            const [length, afterLength] = varint(buf, afterKey);
+            if (key >>> 3 === no)
+                return buf.subarray(afterLength, afterLength + length);
+            i = afterLength + length;
+            continue;
+        }
+        // Skip the fixed and varint shapes; anything else is not a message we know.
+        if (wire === 0)
+            i = varint(buf, afterKey)[1];
+        else if (wire === 5)
+            i = afterKey + 4;
+        else if (wire === 1)
+            i = afterKey + 8;
+        else
+            return undefined;
+    }
+    return undefined;
+}
+/**
+ * The folder a trajectory was opened in, out of the IDE's own metadata blob.
+ *
+ * Field 1.1 is that folder as a `file://` URI (1.2 holds the enclosing
+ * workspace root when the two differ, 1.4 the git branch). Sessions started
+ * with no folder open — the IDE labels them `outside-of-project` — carry no
+ * field 1 at all, and an unknown workspace is the honest answer for them.
+ */
+export function workspaceFromTrajectoryBlob(data) {
+    const opened = protoField(Buffer.from(data), 1);
+    const uri = opened && protoField(opened, 1);
+    return uri?.length ? canonicalizePath(uri.toString('utf8')) : undefined;
+}
+/**
+ * The workspace as the IDE itself records it.
+ *
+ * Antigravity keeps a SQLite file per conversation whose `trajectory_metadata_blob`
+ * holds the blob above. That is the same relation the IDE draws its project
+ * list from, so it beats guessing from tool arguments — which returns the git
+ * root, or a path from some other tree the session happened to touch first.
+ */
+async function workspaceFromConversation(id) {
+    const file = path.join(CONVERSATIONS_DIR, `${id}.db`);
+    if (!(await fs.access(file).then(() => true, () => false)))
+        return undefined;
+    const { DatabaseSync } = await importSqlite();
+    let db;
+    try {
+        db = new DatabaseSync(file, { readOnly: true });
+        const row = db.prepare('SELECT data FROM trajectory_metadata_blob LIMIT 1').get();
+        return row?.data ? workspaceFromTrajectoryBlob(row.data) : undefined;
+    }
+    catch {
+        // A half-written or future-shaped database is not worth failing a listing over.
+        return undefined;
+    }
+    finally {
+        db?.close();
+    }
+}
+function workspaceFromCall(name, args) {
+    if (name === 'run_command' && typeof args.Cwd === 'string' && args.Cwd) {
+        return canonicalizePath(args.Cwd);
+    }
+    for (const key of PATH_ARGS) {
+        const value = args[key];
+        if (typeof value === 'string' && value) {
+            const root = findRepoRoot(value);
+            if (root)
+                return root;
+        }
+    }
+    return undefined;
+}
+async function transcriptPath(dir) {
+    for (const name of TRANSCRIPTS) {
+        const file = path.join(dir, '.system_generated', 'logs', name);
+        try {
+            await fs.access(file);
+            return file;
+        }
+        catch {
+            /* try next */
+        }
+    }
+    return undefined;
+}
+/** Every file the agent left in the session directory, not just markdown. */
+async function readArtifacts(dir) {
+    let entries;
+    try {
+        entries = await fs.readdir(dir);
+    }
+    catch {
+        return [];
+    }
+    const artifacts = [];
+    const names = entries.filter((name) => !name.startsWith('.') && !name.endsWith('.metadata.json')).sort();
+    for (const name of names) {
+        const file = path.join(dir, name);
+        const stat = await fs.stat(file).catch(() => undefined);
+        if (!stat?.isFile())
+            continue;
+        const kind = artifactKind(name);
+        const meta = await fs
+            .readFile(`${file}.metadata.json`, 'utf8')
+            .then((raw) => JSON.parse(raw))
+            .catch(() => undefined);
+        artifacts.push({
+            name,
+            path: file,
+            kind,
+            sizeBytes: stat.size,
+            ...(meta?.summary ? { summary: meta.summary } : {}),
+            ...(meta?.updatedAt ? { updatedAt: meta.updatedAt } : {}),
+            // Binary artifacts are listed, never loaded.
+            ...(kind !== 'image' && TEXT_EXT.test(name)
+                ? { content: await fs.readFile(file, 'utf8').catch(() => undefined) }
+                : {}),
+        });
+    }
+    return artifacts;
+}
+export const antigravityAdapter = {
+    provider: 'antigravity',
+    async listCandidates() {
+        let dirs;
+        try {
+            dirs = await fs.readdir(BRAIN_DIR);
+        }
+        catch {
+            return [];
+        }
+        const found = [];
+        for (const id of dirs) {
+            if (id.startsWith('.'))
+                continue;
+            const file = await transcriptPath(path.join(BRAIN_DIR, id));
+            if (!file)
+                continue;
+            const stat = await fs.stat(file).catch(() => undefined);
+            if (!stat)
+                continue;
+            found.push({ id, path: file, mtimeMs: stat.mtimeMs, sizeBytes: stat.size });
+        }
+        return found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    },
+    async scanRef(candidate) {
+        let title;
+        let workspace = await workspaceFromConversation(candidate.id);
+        let createdAt;
+        for await (const raw of readJsonl(candidate.path, { maxLines: 400 })) {
+            const step = raw;
+            createdAt ??= step.created_at;
+            if (!title && step.type === 'USER_INPUT' && step.content) {
+                title = oneLine(stripPromptEnvelope(step.content), 120);
+            }
+            for (const call of step.tool_calls ?? []) {
+                workspace ??= workspaceFromCall(call.name, unwrapArgs(call.args));
+            }
+            if (title && workspace)
+                break;
+        }
+        return {
+            id: candidate.id,
+            provider: 'antigravity',
+            path: candidate.path,
+            title,
+            workspace,
+            createdAt,
+            updatedAt: new Date(candidate.mtimeMs).toISOString(),
+            sizeBytes: candidate.sizeBytes,
+        };
+    },
+    /**
+     * `parse` also reads the artifacts sitting next to the transcript, so the
+     * transcript's own size and mtime are not the whole identity.
+     */
+    async auxFingerprint(candidate) {
+        const dir = path.dirname(path.dirname(path.dirname(candidate.path)));
+        const names = await fs.readdir(dir).catch(() => []);
+        return auxiliaryFingerprint([
+            ...names.filter((name) => name !== '.system_generated').map((name) => path.join(dir, name)),
+            ...['steps', 'tasks', 'messages'].map((name) => path.join(dir, '.system_generated', name)),
+        ]);
+    },
+    async parse(candidate) {
+        const turns = [];
+        const sources = sourceEvents('antigravity', candidate.id);
+        let title;
+        let workspace = await workspaceFromConversation(candidate.id);
+        let createdAt;
+        const stats = emptyProviderStats();
+        const push = (turn) => {
+            turns.push({ ...sources.event(turn), index: turns.length, id: `${candidate.id}#${turns.length}` });
+        };
+        for await (const raw of readJsonl(candidate.path)) {
+            const step = raw;
+            sources.record(raw, step.step_index !== undefined ? `step:${step.step_index}` : undefined);
+            const timestamp = step.created_at;
+            createdAt ??= timestamp;
+            const sourceIndex = step.step_index;
+            const truncated = (step.truncated_fields?.length ?? 0) > 0;
+            if (step.type && !['USER_INPUT', 'PLANNER_RESPONSE', 'GENERIC'].includes(step.type)) {
+                stats.extras[step.type] = (stats.extras[step.type] ?? 0) + 1;
+            }
+            if (step.type === 'USER_INPUT' && step.content) {
+                const text = stripPromptEnvelope(step.content);
+                title ??= oneLine(text, 120);
+                push({ kind: 'user', text, timestamp, sourceIndex });
+                continue;
+            }
+            if (step.thinking)
+                push({ kind: 'thinking', text: step.thinking, timestamp, sourceIndex });
+            if (step.type === 'PLANNER_RESPONSE' && step.content) {
+                push({ kind: 'assistant', text: step.content, timestamp, sourceIndex, truncated });
+            }
+            for (const call of step.tool_calls ?? []) {
+                const args = unwrapArgs(call.args);
+                workspace ??= workspaceFromCall(call.name, args);
+                push({ kind: 'tool_call', toolName: call.name, toolArgs: args, timestamp, sourceIndex, truncated });
+            }
+            if (step.type === 'GENERIC' && step.content) {
+                const exit = EXIT_CODE.exec(step.content);
+                const times = TIME_PAIR.exec(step.content);
+                const exitCode = exit ? Number(exit[1]) : undefined;
+                const durationMs = times
+                    ? Math.max(0, Date.parse(times[2]) - Date.parse(times[1])) || undefined
+                    : undefined;
+                push({
+                    kind: 'tool_result',
+                    toolResult: step.content,
+                    // Prefer the printed exit status; fall back to wording only without one.
+                    isError: exitCode !== undefined
+                        ? exitCode !== 0
+                        : /Encountered error|Error:|command failed/i.test(step.content.slice(0, 400)),
+                    timestamp,
+                    sourceIndex,
+                    truncated,
+                    ...(exitCode !== undefined ? { exitCode } : {}),
+                    ...(durationMs !== undefined ? { durationMs } : {}),
+                });
+            }
+        }
+        for (const event of turns) {
+            if (!event.truncated || event.sourceIndex === undefined)
+                continue;
+            const full = await readFullStepOutput(candidate.path, event.sourceIndex);
+            if (full !== undefined && event.kind !== 'tool_call') {
+                event.fullText = full;
+                event.fullTextPath = path.resolve(path.dirname(candidate.path), '..', 'steps', String(event.sourceIndex), 'output.txt');
+            }
+            else if (full === undefined) {
+                event.truncationNote = `transcript 已截断，steps/${event.sourceIndex}/output.txt 不存在`;
+            }
+        }
+        const dir = path.resolve(path.dirname(candidate.path), '..', '..');
+        const systemDir = path.join(dir, '.system_generated');
+        const artifacts = await readArtifacts(dir);
+        stats.backgroundTasks = await readTasks(systemDir);
+        stats.uploads = await readUploads(dir);
+        return {
+            ref: {
+                id: candidate.id,
+                provider: 'antigravity',
+                path: candidate.path,
+                title: title ?? clip(artifacts[0]?.name, 120),
+                titles: existingTitles([title, 'prompt']),
+                workspace,
+                createdAt,
+                updatedAt: turns.at(-1)?.timestamp ?? new Date(candidate.mtimeMs).toISOString(),
+                sizeBytes: candidate.sizeBytes,
+            },
+            turns,
+            artifacts,
+            stats,
+        };
+    },
+};
+/** Antigravity shortens long step output in the transcript; this is the full copy. */
+export async function readFullStepOutput(transcriptPath, stepIndex) {
+    const systemDir = path.resolve(path.dirname(transcriptPath), '..');
+    return fs.readFile(path.join(systemDir, 'steps', String(stepIndex), 'output.txt'), 'utf8').catch(() => undefined);
+}
