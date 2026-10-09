@@ -697,4 +697,6 @@ dsh plugin --profile web add ./session-reader-<version>.tgz
 
 发布顺序是先 publish 再 push：npm 发布失败时远端不会留下悬空的版本提交和 tag，直接重跑即可。
 
-仓库需要配置 secret `NPM_TOKEN`（npm 上具备该包发布权限的 Automation token）。
+npm 接受发布后可能仍需几分钟才能公开下载，流程会等待 registry metadata。如果发布已成功、后续下载或 Release 附件步骤失败，先确认精确版本的 registry 状态，再补齐同版本附件；不要为补附件再次发布或递增版本。
+
+仓库需要配置 secret `NPM_TOKEN`（npm 上具备该包发布权限的 granular access token）。
