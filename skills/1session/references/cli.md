@@ -14,11 +14,15 @@ Read this when SKILL.md doesn't cover the flag you need.
 | Flag | Effect |
 | --- | --- |
 | `--json` | Machine-readable output instead of the rendered text. |
-| `--no-index` | Bypass the SQLite index and read the raw files. Results should match the indexed path exactly; use it to verify a suspicious result, not routinely (it is slower). |
+| `--no-index` | Bypass the SQLite index and read the raw files. Use it to explicitly skip cache writes, retry a read on an older installation with an unwritable index, or verify a suspicious result (it is slower). |
 
 The index lives at `~/.1agents/session-reader/index.db`. It fingerprints each
 session file (size + mtime + head hash) and reparses only changed bytes, so
 `list` never silently truncates older sessions no matter how wide `--scope` is.
+Search, listing and session reads automatically bypass an index that cannot be
+opened or written due to permissions or a read-only filesystem. The fallback
+warning goes to stderr and does not alter JSON on stdout. `index` and `graph`
+still require a writable index; unrelated database errors are not hidden.
 
 DSH supports v2 and v4 transcripts, plain or zstd-compressed. When both remain
 after a migration, the current format wins and the session ID stays unchanged.

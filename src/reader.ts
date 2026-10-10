@@ -6,7 +6,7 @@ import { decodeZstd } from './util/zstd.js';
 import { callsIn } from './calls.js';
 import { parseEventSpec, summarizeTurns } from './turns.js';
 import { indexedHandle, loadSession, resolveSession, type LoadOptions } from './resolver.js';
-import { openStore } from './store/db.js';
+import { openStore, tryIndex } from './store/db.js';
 import { refreshSession } from './store/indexer.js';
 import { eventsOf, findSessionRow, refOf, sessionRow, type SessionRow } from './store/read.js';
 import type { NormalizedSession, SessionRef, TurnEvent, TurnSummary } from './types.js';
@@ -78,13 +78,15 @@ export function contentPage(events: TurnEvent[], options: ReadOptions = {}) {
   return { items, ...(at < events.length ? { nextCursor: Buffer.from(JSON.stringify({ key, at, offset })).toString('base64url') } : {}) };
 }
 
-async function indexedSession(id: string, options: LoadOptions = {}): Promise<{ db: Awaited<ReturnType<typeof openStore>>; row: SessionRow }> {
-  const db = await openStore();
-  const known = findSessionRow(db, id);
-  const handle = (known && known.id.toLowerCase() === id.toLowerCase() ? await indexedHandle(known) : undefined) ?? await resolveSession(id);
-  if (!handle) throw new Error(`session not found: ${id}`);
-  const refreshed = await refreshSession(db, handle, { edges: false, force: options.force });
-  return { db, row: sessionRow(db, refreshed.id)! };
+async function indexedSession(id: string, options: LoadOptions = {}): Promise<{ db: Awaited<ReturnType<typeof openStore>>; row: SessionRow } | undefined> {
+  return tryIndex(async () => {
+    const db = await openStore();
+    const known = findSessionRow(db, id);
+    const handle = (known && known.id.toLowerCase() === id.toLowerCase() ? await indexedHandle(known) : undefined) ?? await resolveSession(id);
+    if (!handle) throw new Error(`session not found: ${id}`);
+    const refreshed = await refreshSession(db, handle, { edges: false, force: options.force });
+    return { db, row: sessionRow(db, refreshed.id)! };
+  });
 }
 
 function direct(options: LoadOptions): boolean {
@@ -103,12 +105,13 @@ function summariesIn(session: NormalizedSession, spec: string) {
 /** Reads a batch of turn ranges without rebuilding all indexed session events. */
 export async function readTurns(id: string, spec: string, options: ReadOptions = {}) {
   let session: SessionRef; let summaries: TurnSummary[]; let events: TurnEvent[];
-  if (direct(options)) {
-    const normalized = await loadSession(id, options);
+  const indexed = direct(options) ? undefined : await indexedSession(id, options);
+  if (!indexed) {
+    const normalized = await loadSession(id, { ...options, useIndex: false });
     session = normalized.ref; summaries = summariesIn(normalized, spec);
     events = summaries.flatMap((summary) => normalized.turns.slice(summary.events[0], summary.events[1] + 1));
   } else {
-    const { db, row } = await indexedSession(id, options);
+    const { db, row } = indexed;
     session = refOf(row);
     summaries = parseEventSpec(spec, row.turn_count + 1).map((no) => {
       const stored = db.prepare('SELECT summary_json FROM turn_ranges WHERE session_id = ? AND no = ?').get(row.id, no) as { summary_json: string } | undefined;
@@ -122,11 +125,12 @@ export async function readTurns(id: string, spec: string, options: ReadOptions =
 
 /** The directory is persisted during indexing; listing it need not hydrate every event. */
 export async function readTurnDirectory(id: string, options: LoadOptions = {}) {
-  if (direct(options)) {
-    const normalized = await loadSession(id, options);
+  const indexed = direct(options) ? undefined : await indexedSession(id, options);
+  if (!indexed) {
+    const normalized = await loadSession(id, { ...options, useIndex: false });
     return { session: normalized.ref, eventCount: normalized.turns.length, turns: summarizeTurns(normalized) };
   }
-  const { db, row } = await indexedSession(id, options);
+  const { db, row } = indexed;
   const rows = db.prepare('SELECT summary_json FROM turn_ranges WHERE session_id = ? ORDER BY no').all(row.id) as { summary_json: string }[];
   return { session: refOf(row), eventCount: row.event_count, turns: rows.map((item) => JSON.parse(item.summary_json) as TurnSummary) };
 }
@@ -134,8 +138,9 @@ export async function readTurnDirectory(id: string, options: LoadOptions = {}) {
 /** Numeric E aliases remain supported; native source locators are exact selectors. */
 async function selectedEvents(id: string, selectors: string[], options: ReadOptions = {}) {
   let session: SessionRef; let events: TurnEvent[] = [];
-  if (direct(options)) {
-    const normalized = await loadSession(id, options); session = normalized.ref;
+  const indexed = direct(options) ? undefined : await indexedSession(id, options);
+  if (!indexed) {
+    const normalized = await loadSession(id, { ...options, useIndex: false }); session = normalized.ref;
     for (const selector of selectors) {
       const found = selector.startsWith('event:') ? normalized.turns.filter((event) => event.locator === selector)
         : parseEventSpec(selector, normalized.turns.length).map((index) => normalized.turns[index]).filter((event): event is TurnEvent => !!event);
@@ -143,7 +148,7 @@ async function selectedEvents(id: string, selectors: string[], options: ReadOpti
       events.push(...found);
     }
   } else {
-    const { db, row } = await indexedSession(id, options); session = refOf(row);
+    const { db, row } = indexed; session = refOf(row);
     for (const selector of selectors) {
       if (selector.startsWith('event:')) {
         const matches = db.prepare('SELECT idx FROM events WHERE session_id = ? AND locator = ?').all(row.id, selector) as { idx: number }[];
@@ -200,14 +205,15 @@ export async function readOriginalRecords(id: string, selectors: string[], optio
 
 export async function readCall(id: string, callId: string, options: ReadOptions = {}) {
   let session: SessionRef; let events: TurnEvent[];
-  if (direct(options)) {
-    const normalized = await loadSession(id, options); session = normalized.ref;
+  const indexed = direct(options) ? undefined : await indexedSession(id, options);
+  if (!indexed) {
+    const normalized = await loadSession(id, { ...options, useIndex: false }); session = normalized.ref;
     const calls = normalized.turns.filter((event) => event.kind === 'tool_call' && (event.callId === callId || event.locator === callId));
     if (calls.length !== 1) throw new Error(`call not found or ambiguous: ${callId}`);
     const call = calls[0]!;
     events = [call, ...normalized.turns.filter((event) => event.kind === 'tool_result' && !!call.callId && event.callId === call.callId)];
   } else {
-    const { db, row } = await indexedSession(id, options); session = refOf(row);
+    const { db, row } = indexed; session = refOf(row);
     const calls = db.prepare("SELECT idx, call_id FROM events WHERE session_id = ? AND kind = 'tool_call' AND (call_id = ? OR locator = ?)").all(row.id, callId, callId) as { idx: number; call_id: string | null }[];
     if (calls.length !== 1) throw new Error(`call not found or ambiguous: ${callId}`);
     const call = calls[0]!;
@@ -219,10 +225,11 @@ export async function readCall(id: string, callId: string, options: ReadOptions 
 
 export async function readArtifact(id: string, artifactPath: string, options: ReadOptions = {}) {
   let session: SessionRef; let artifacts: NormalizedSession['artifacts'];
-  if (direct(options)) {
-    const normalized = await loadSession(id, options); session = normalized.ref; artifacts = normalized.artifacts;
+  const indexed = direct(options) ? undefined : await indexedSession(id, options);
+  if (!indexed) {
+    const normalized = await loadSession(id, { ...options, useIndex: false }); session = normalized.ref; artifacts = normalized.artifacts;
   } else {
-    const { row } = await indexedSession(id, options); session = refOf(row); artifacts = row.artifacts_json ? JSON.parse(row.artifacts_json) : [];
+    const { row } = indexed; session = refOf(row); artifacts = row.artifacts_json ? JSON.parse(row.artifacts_json) : [];
   }
   const artifact = artifacts.find((item) => item.path === artifactPath);
   if (!artifact) throw new Error(`artifact not found: ${artifactPath}`);

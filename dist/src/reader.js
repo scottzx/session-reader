@@ -6,7 +6,7 @@ import { decodeZstd } from './util/zstd.js';
 import { callsIn } from './calls.js';
 import { parseEventSpec, summarizeTurns } from './turns.js';
 import { indexedHandle, loadSession, resolveSession } from './resolver.js';
-import { openStore } from './store/db.js';
+import { openStore, tryIndex } from './store/db.js';
 import { refreshSession } from './store/indexer.js';
 import { eventsOf, findSessionRow, refOf, sessionRow } from './store/read.js';
 function bodyOf(event) {
@@ -66,13 +66,15 @@ export function contentPage(events, options = {}) {
     return { items, ...(at < events.length ? { nextCursor: Buffer.from(JSON.stringify({ key, at, offset })).toString('base64url') } : {}) };
 }
 async function indexedSession(id, options = {}) {
-    const db = await openStore();
-    const known = findSessionRow(db, id);
-    const handle = (known && known.id.toLowerCase() === id.toLowerCase() ? await indexedHandle(known) : undefined) ?? await resolveSession(id);
-    if (!handle)
-        throw new Error(`session not found: ${id}`);
-    const refreshed = await refreshSession(db, handle, { edges: false, force: options.force });
-    return { db, row: sessionRow(db, refreshed.id) };
+    return tryIndex(async () => {
+        const db = await openStore();
+        const known = findSessionRow(db, id);
+        const handle = (known && known.id.toLowerCase() === id.toLowerCase() ? await indexedHandle(known) : undefined) ?? await resolveSession(id);
+        if (!handle)
+            throw new Error(`session not found: ${id}`);
+        const refreshed = await refreshSession(db, handle, { edges: false, force: options.force });
+        return { db, row: sessionRow(db, refreshed.id) };
+    });
 }
 function direct(options) {
     return options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1';
@@ -91,14 +93,15 @@ export async function readTurns(id, spec, options = {}) {
     let session;
     let summaries;
     let events;
-    if (direct(options)) {
-        const normalized = await loadSession(id, options);
+    const indexed = direct(options) ? undefined : await indexedSession(id, options);
+    if (!indexed) {
+        const normalized = await loadSession(id, { ...options, useIndex: false });
         session = normalized.ref;
         summaries = summariesIn(normalized, spec);
         events = summaries.flatMap((summary) => normalized.turns.slice(summary.events[0], summary.events[1] + 1));
     }
     else {
-        const { db, row } = await indexedSession(id, options);
+        const { db, row } = indexed;
         session = refOf(row);
         summaries = parseEventSpec(spec, row.turn_count + 1).map((no) => {
             const stored = db.prepare('SELECT summary_json FROM turn_ranges WHERE session_id = ? AND no = ?').get(row.id, no);
@@ -112,11 +115,12 @@ export async function readTurns(id, spec, options = {}) {
 }
 /** The directory is persisted during indexing; listing it need not hydrate every event. */
 export async function readTurnDirectory(id, options = {}) {
-    if (direct(options)) {
-        const normalized = await loadSession(id, options);
+    const indexed = direct(options) ? undefined : await indexedSession(id, options);
+    if (!indexed) {
+        const normalized = await loadSession(id, { ...options, useIndex: false });
         return { session: normalized.ref, eventCount: normalized.turns.length, turns: summarizeTurns(normalized) };
     }
-    const { db, row } = await indexedSession(id, options);
+    const { db, row } = indexed;
     const rows = db.prepare('SELECT summary_json FROM turn_ranges WHERE session_id = ? ORDER BY no').all(row.id);
     return { session: refOf(row), eventCount: row.event_count, turns: rows.map((item) => JSON.parse(item.summary_json)) };
 }
@@ -124,8 +128,9 @@ export async function readTurnDirectory(id, options = {}) {
 async function selectedEvents(id, selectors, options = {}) {
     let session;
     let events = [];
-    if (direct(options)) {
-        const normalized = await loadSession(id, options);
+    const indexed = direct(options) ? undefined : await indexedSession(id, options);
+    if (!indexed) {
+        const normalized = await loadSession(id, { ...options, useIndex: false });
         session = normalized.ref;
         for (const selector of selectors) {
             const found = selector.startsWith('event:') ? normalized.turns.filter((event) => event.locator === selector)
@@ -136,7 +141,7 @@ async function selectedEvents(id, selectors, options = {}) {
         }
     }
     else {
-        const { db, row } = await indexedSession(id, options);
+        const { db, row } = indexed;
         session = refOf(row);
         for (const selector of selectors) {
             if (selector.startsWith('event:')) {
@@ -209,8 +214,9 @@ export async function readOriginalRecords(id, selectors, options = {}) {
 export async function readCall(id, callId, options = {}) {
     let session;
     let events;
-    if (direct(options)) {
-        const normalized = await loadSession(id, options);
+    const indexed = direct(options) ? undefined : await indexedSession(id, options);
+    if (!indexed) {
+        const normalized = await loadSession(id, { ...options, useIndex: false });
         session = normalized.ref;
         const calls = normalized.turns.filter((event) => event.kind === 'tool_call' && (event.callId === callId || event.locator === callId));
         if (calls.length !== 1)
@@ -219,7 +225,7 @@ export async function readCall(id, callId, options = {}) {
         events = [call, ...normalized.turns.filter((event) => event.kind === 'tool_result' && !!call.callId && event.callId === call.callId)];
     }
     else {
-        const { db, row } = await indexedSession(id, options);
+        const { db, row } = indexed;
         session = refOf(row);
         const calls = db.prepare("SELECT idx, call_id FROM events WHERE session_id = ? AND kind = 'tool_call' AND (call_id = ? OR locator = ?)").all(row.id, callId, callId);
         if (calls.length !== 1)
@@ -233,13 +239,14 @@ export async function readCall(id, callId, options = {}) {
 export async function readArtifact(id, artifactPath, options = {}) {
     let session;
     let artifacts;
-    if (direct(options)) {
-        const normalized = await loadSession(id, options);
+    const indexed = direct(options) ? undefined : await indexedSession(id, options);
+    if (!indexed) {
+        const normalized = await loadSession(id, { ...options, useIndex: false });
         session = normalized.ref;
         artifacts = normalized.artifacts;
     }
     else {
-        const { row } = await indexedSession(id, options);
+        const { row } = indexed;
         session = refOf(row);
         artifacts = row.artifacts_json ? JSON.parse(row.artifacts_json) : [];
     }

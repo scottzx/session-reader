@@ -191,5 +191,6 @@ installing software, and the difference is worth respecting.
 | The skill vanished from every agent at once | It was installed in link mode from an npx cache that npm has since pruned. Install the package globally, then `1session skill install --force`. |
 | `skill install` reports `blocked` | Something else already owns that name — a hand-written skill, or a copy where a link is wanted. Look at it before passing `--force`. |
 | The first call takes ~10s | That is the initial index build over every session on the machine, not a hang. Subsequent calls are sub-second. |
+| The index is not writable / `attempt to write a readonly database` | Reads automatically fall back to the original files with a warning on stderr. On an older installation, retry the same read with `--no-index`. Source files still need read access; do not copy a live index or delete WAL/SHM files as a permission workaround. |
 | Results look stale or wrong | `1session index --all --global` rebuilds, and `--no-index` on any command reads the raw files directly — if those two disagree, that is a real bug worth reporting. |
 | `list` returns nothing in a directory that definitely had sessions | Scope, not installation. `list` defaults to the pwd subtree; add `--global`. |

@@ -43,6 +43,7 @@ search 命中附带稳定 locator；元数据与产物命中不属于某一轮�
 默认折叠本次检索自身在活跃会话里留下的回声，--include-self 展开。
 
 全局：--no-index 绕过索引直读源文件。索引位于 ~/.1agents/session-reader/index.db
+     索引不可写时，搜索、列表和会话读取自动直读源文件；提示输出到 stderr。
      list / search / index --all 默认只看当前 pwd 目录（含子目录）下的会话。
      --scope 取当前目录的相对路径或绝对路径，按子树匹配：--scope .. 含同级项目，
      --scope ~ 含 home 下全部；--global（= --scope global，= --scope /）跨全部项目。
@@ -136,11 +137,17 @@ async function load(sessionId) {
  * identity was injected. Costs nothing and is silently skipped otherwise.
  */
 async function noteRead(verb, target) {
-    if (!useIndex || !target || !process.env.SESSION_READER_CALLER_SESSION)
+    if (!useIndex || process.env.SESSION_READER_NO_INDEX === '1' || !target || !process.env.SESSION_READER_CALLER_SESSION)
         return;
-    const { openStore } = await import('../src/store/db.js');
+    const { openStore, isIndexWriteError } = await import('../src/store/db.js');
     const { captureRuntimeEdge } = await import('../src/store/edges.js');
-    captureRuntimeEdge(await openStore(), verb, target);
+    try {
+        captureRuntimeEdge(await openStore(), verb, target);
+    }
+    catch (error) {
+        if (!isIndexWriteError(error))
+            throw error;
+    }
 }
 async function main() {
     const { command, positional, flags } = parseArgs(process.argv.slice(2));

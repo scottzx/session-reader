@@ -9,6 +9,7 @@ import { grokAdapter } from './parsers/grok.js';
 import type { ProviderAdapter, SessionCandidate } from './parsers/provider.js';
 import { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
 import type { AgentProvider, NormalizedSession, SessionRef } from './types.js';
+import { isIndexWriteError, tryIndex } from './store/db.js';
 
 export const adapters: ProviderAdapter[] = [
   antigravityAdapter,
@@ -128,7 +129,8 @@ export async function listRecentSessions(options: ListOptions = {}): Promise<Ses
   if (options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1') {
     return (await listResolvedSessions(options)).map((session) => session.ref);
   }
-  return listIndexedSessions(options);
+  return await tryIndex(() => listIndexedSessions(options))
+    ?? (await listResolvedSessions({ ...options, scan: options.scan ?? Infinity })).map((session) => session.ref);
 }
 
 /**
@@ -162,9 +164,10 @@ async function listIndexedSessions(options: ListOptions): Promise<SessionRef[]> 
     if (options.provider && adapter.provider !== options.provider) continue;
     for (const candidate of await adapter.listCandidates()) {
       if (sinceMs && candidate.mtimeMs < sinceMs) break; // candidates are newest first
-      const result = await refreshSession(db, { adapter, candidate }, { edges: false }).catch(
-        () => undefined,
-      );
+      const result = await refreshSession(db, { adapter, candidate }, { edges: false }).catch((error) => {
+        if (isIndexWriteError(error)) throw error;
+        return undefined;
+      });
       if (result) ids.push(result.id);
     }
   }
@@ -226,19 +229,21 @@ export async function loadSession(
   if (options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1') {
     return parseSession(sessionId);
   }
-  const { openStore } = await import('./store/db.js');
-  const { findSessionRow } = await import('./store/read.js');
-  const { indexSession } = await import('./store/indexer.js');
-  const db = await openStore();
+  return await tryIndex(async () => {
+    const { openStore } = await import('./store/db.js');
+    const { findSessionRow } = await import('./store/read.js');
+    const { indexSession } = await import('./store/indexer.js');
+    const db = await openStore();
 
-  // A session the index already knows can be re-checked with a single stat,
-  // instead of walking every provider directory again.
-  const row = findSessionRow(db, sessionId);
-  const handle = (row && row.id.toLowerCase() === sessionId.toLowerCase() ? await indexedHandle(row) : undefined)
-    ?? (await resolveSession(sessionId));
-  if (!handle) throw new Error(`session not found: ${sessionId}`);
-  const result = await indexSession(db, handle, { ...(options.force ? { force: true } : {}) });
-  return result.session;
+    // A session the index already knows can be re-checked with a single stat,
+    // instead of walking every provider directory again.
+    const row = findSessionRow(db, sessionId);
+    const handle = (row && row.id.toLowerCase() === sessionId.toLowerCase() ? await indexedHandle(row) : undefined)
+      ?? (await resolveSession(sessionId));
+    if (!handle) throw new Error(`session not found: ${sessionId}`);
+    const result = await indexSession(db, handle, { ...(options.force ? { force: true } : {}) });
+    return result.session;
+  }) ?? parseSession(sessionId);
 }
 
 /** Rebuilds an adapter handle from an indexed row without a directory scan. */

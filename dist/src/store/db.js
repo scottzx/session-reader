@@ -12,6 +12,34 @@ export function defaultDbPath() {
 }
 let cached;
 let cachedPath;
+export function isIndexWriteError(error) {
+    if (!error || typeof error !== 'object')
+        return false;
+    const { code, errcode, path: denied } = error;
+    if (['EACCES', 'EPERM', 'EROFS'].includes(code ?? '')) {
+        if (!denied)
+            return true;
+        const dbPath = path.resolve(defaultDbPath());
+        const target = path.resolve(denied);
+        return ['', '-wal', '-shm'].some((suffix) => target === `${dbPath}${suffix}`)
+            || `${path.dirname(dbPath)}${path.sep}`.startsWith(`${target}${path.sep}`);
+    }
+    return ['SQLITE_PERM', 'SQLITE_READONLY', 'SQLITE_CANTOPEN'].includes(code ?? '')
+        // SQLite extended result codes keep the primary code in the low byte.
+        || (typeof errcode === 'number' && [3, 8, 14].includes(errcode & 0xff));
+}
+/** Permission failures disable the cache for this read, never the source files. */
+export async function tryIndex(read) {
+    try {
+        return await read();
+    }
+    catch (error) {
+        if (!isIndexWriteError(error))
+            throw error;
+        console.warn('1session: index is not writable; reading raw session files instead (slower).');
+        return undefined;
+    }
+}
 /**
  * Opens (and migrates) the index. The handle is cached per path so a single
  * CLI run never opens the file twice.
@@ -23,17 +51,26 @@ export async function openStore(dbPath = defaultDbPath()) {
     if (dbPath !== ':memory:')
         fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     let db = new Sqlite(dbPath);
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA synchronous = NORMAL');
-    db.exec('PRAGMA busy_timeout = 5000');
-    if (schemaVersionOf(db) !== SCHEMA_VERSION) {
-        db = rebuild(db, Sqlite, dbPath);
+    try {
+        db.exec('PRAGMA journal_mode = WAL');
+        db.exec('PRAGMA synchronous = NORMAL');
+        db.exec('PRAGMA busy_timeout = 5000');
+        if (schemaVersionOf(db) !== SCHEMA_VERSION) {
+            db = rebuild(db, Sqlite, dbPath);
+        }
+        db.exec(DDL);
+        db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
+        cached = db;
+        cachedPath = dbPath;
+        return db;
     }
-    db.exec(DDL);
-    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
-    cached = db;
-    cachedPath = dbPath;
-    return db;
+    catch (error) {
+        try {
+            db.close();
+        }
+        catch { /* rebuild may have already closed it */ }
+        throw error;
+    }
 }
 function schemaVersionOf(db) {
     try {

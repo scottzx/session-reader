@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { adapters } from '../src/resolver.js';
+import { adapters, listRecentSessions, loadSession } from '../src/resolver.js';
 import { claudeAdapter } from '../src/parsers/claude.js';
 import { codexAdapter } from '../src/parsers/codex.js';
 import { dshAdapter } from '../src/parsers/dsh.js';
@@ -51,6 +54,144 @@ async function fixture(run: (dir: string, add: (adapter: ProviderAdapter, name: 
 
 const user = (text: string, uuid: string, timestamp = '2026-01-01T00:00:00Z') => ({ type: 'user', uuid, cwd: '/tmp/ws', timestamp, message: { role: 'user', content: [{ type: 'text', text }] } });
 const assistant = (text: string, uuid: string, timestamp = '2026-01-01T00:00:01Z') => ({ type: 'assistant', uuid, timestamp, message: { id: `message-${uuid}`, content: [{ type: 'text', text }] } });
+
+test('read-only index writes fall back to fresh source data across search, listings and readers', async t => fixture(async (dir, add) => {
+  await add(claudeAdapter, 'readonly-session.jsonl', [
+    user('readonly question', 'u1'),
+    { type: 'assistant', uuid: 'a1', message: { content: [{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command: 'echo hello' } }] } },
+    { type: 'user', uuid: 'r1', message: { content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'hello' }] } },
+    assistant('readonly answer', 'a2'),
+  ]);
+  await add(grokAdapter, 'readonly-artifact/chat_history.jsonl', [{ type: 'user', content: 'readonly artifact' }]);
+  const artifact = path.join(dir, 'readonly-artifact/goal/plan.md');
+  await fs.mkdir(path.dirname(artifact));
+  await fs.writeFile(artifact, 'readonly plan');
+  const db = await openStore();
+  db.exec('PRAGMA query_only = ON');
+  const warnings = t.mock.method(console, 'warn', () => {});
+  try {
+    const id = 'claude:readonly-session';
+    const options = { useIndex: false };
+    assert.deepEqual(await searchSessions('readonly'), await searchSessions('readonly', options));
+    const first = await searchSessions('readonly', { sessionId: id, maxPerSession: 1 });
+    assert.ok(first[0]!.nextCursor);
+    const continuation = { sessionId: id, maxPerSession: 1, cursor: first[0]!.nextCursor };
+    assert.deepEqual(await searchSessions('readonly', continuation), await searchSessions('readonly', { ...continuation, ...options }));
+    assert.deepEqual(await listRecentSessions(), await listRecentSessions(options));
+    assert.deepEqual(await loadSession(id), await loadSession(id, options));
+    assert.deepEqual(await readTurnDirectory(id), await readTurnDirectory(id, options));
+    const page = await readTurns(id, '1', { maxChars: 5 });
+    assert.deepEqual(page, await readTurns(id, '1', { ...options, maxChars: 5 }));
+    assert.deepEqual(await readTurns(id, '1', { maxChars: 5, cursor: page.nextCursor }), await readTurns(id, '1', { ...options, maxChars: 5, cursor: page.nextCursor }));
+    assert.deepEqual(await readEvents(id, ['0']), await readEvents(id, ['0'], options));
+    assert.deepEqual(await readOriginalRecords(id, ['0']), await readOriginalRecords(id, ['0'], options));
+    assert.deepEqual(await readCall(id, 'c1'), await readCall(id, 'c1', options));
+    assert.deepEqual(await readArtifact('grok:readonly-artifact', artifact), await readArtifact('grok:readonly-artifact', artifact, options));
+    assert.ok(warnings.mock.callCount() > 0);
+    assert.equal(db.prepare('SELECT count(*) AS count FROM sessions').get()!.count, 0);
+  } finally {
+    db.exec('PRAGMA query_only = OFF');
+    warnings.mock.restore();
+  }
+  assert.equal((await searchSessions('readonly')).length, 2, 'restored write access can use the index again');
+  assert.equal(db.prepare('SELECT count(*) AS count FROM sessions').get()!.count, 2);
+}));
+
+test('read-only SQLite initialization falls back and closes failed store handles', async t => fixture(async (_dir, add) => {
+  await add(claudeAdapter, 'init-session.jsonl', [user('question', 'u1')]);
+  const db = await openStore();
+  db.close(); resetStoreCache();
+  const { DatabaseSync } = await import('node:sqlite');
+  const exec = DatabaseSync.prototype.exec;
+  const readonly = t.mock.method(DatabaseSync.prototype, 'exec', function (this: InstanceType<typeof DatabaseSync>, sql: string) {
+    if (sql === 'PRAGMA journal_mode = WAL') exec.call(this, 'PRAGMA query_only = ON');
+    return exec.call(this, sql);
+  });
+  const close = t.mock.method(DatabaseSync.prototype, 'close');
+  const warnings = t.mock.method(console, 'warn', () => {});
+  try {
+    assert.equal((await searchSessions('question')).length, 1);
+    assert.equal((await listRecentSessions()).length, 1);
+    assert.equal((await readTurns('claude:init-session', '1')).items[0]!.content, 'question');
+    assert.equal(close.mock.callCount(), 3);
+  } finally {
+    readonly.mock.restore(); close.mock.restore(); warnings.mock.restore();
+  }
+}));
+
+test('unwritable index directories fall back without truncating listings at the direct scan budget', async t => fixture(async (dir, add) => {
+  for (let i = 0; i < 61; i++) await add(claudeAdapter, `denied-${i}.jsonl`, [user(`question ${i}`, `u${i}`)]);
+  const mkdir = fsSync.mkdirSync;
+  const warnings = t.mock.method(console, 'warn', () => {});
+  try {
+    for (const code of ['EACCES', 'EPERM', 'EROFS']) {
+      const denied = t.mock.method(fsSync, 'mkdirSync', ((target: fsSync.PathLike, options: unknown) => {
+        if (target === dir) throw Object.assign(new Error('index directory is not writable'), { code });
+        return mkdir(target, options as fsSync.MakeDirectoryOptions);
+      }) as typeof fsSync.mkdirSync);
+      try {
+        assert.deepEqual(await searchSessions('question'), await searchSessions('question', { useIndex: false }));
+        assert.deepEqual(await listRecentSessions({ limit: 100 }), await listRecentSessions({ limit: 100, scan: Infinity, useIndex: false }));
+        assert.deepEqual(await listRecentSessions({ limit: 100, refresh: false }), await listRecentSessions({ limit: 100, scan: Infinity, useIndex: false }));
+        assert.equal((await listRecentSessions({ limit: 100 })).length, 61);
+        assert.deepEqual(await readTurns('claude:denied-60', '1'), await readTurns('claude:denied-60', '1', { useIndex: false }));
+      } finally { denied.mock.restore(); }
+    }
+  } finally { warnings.mock.restore(); }
+}));
+
+test('corrupt indexes still report database errors instead of silently falling back', async t => fixture(async (dir, add) => {
+  await add(claudeAdapter, 'corrupt-session.jsonl', [user('question', 'u1')]);
+  const file = path.join(dir, 'index.db');
+  await fs.writeFile(file, 'not a SQLite database');
+  const warnings = t.mock.method(console, 'warn', () => {});
+  try {
+    await assert.rejects(searchSessions('question'), /not a database/);
+    await assert.rejects(listRecentSessions(), /not a database/);
+    await assert.rejects(readTurns('claude:corrupt-session', '1'), /not a database/);
+    assert.equal(warnings.mock.callCount(), 0);
+  } finally {
+    warnings.mock.restore();
+    await fs.rm(file);
+  }
+}));
+
+test('source permission errors are reported without blaming the index', async t => fixture(async (_dir, add) => {
+  const candidate = await add(claudeAdapter, 'source-session.jsonl', [user('question', 'u1')]);
+  const error = Object.assign(new Error('source is not readable'), { code: 'EACCES', path: candidate.path });
+  const parse = t.mock.method(claudeAdapter, 'parse', async () => { throw error; });
+  const warnings = t.mock.method(console, 'warn', () => {});
+  try {
+    await assert.rejects(searchSessions('question'), (caught) => caught === error);
+    await assert.rejects(readTurns('claude:source-session', '1'), (caught) => caught === error);
+    assert.equal(warnings.mock.callCount(), 0);
+  } finally { parse.mock.restore(); warnings.mock.restore(); }
+}));
+
+test('CLI fallback keeps JSON stdout valid even when caller edge recording cannot write', async () => fixture(async (dir) => {
+  const home = path.join(dir, 'home');
+  const sessions = path.join(home, '.claude/projects/-tmp-ws');
+  await fs.mkdir(sessions, { recursive: true });
+  await fs.writeFile(path.join(sessions, 'cli-session.jsonl'), JSON.stringify(user('original question', 'u1')) + '\n');
+  const preload = path.join(dir, 'deny-index.mjs');
+  await fs.writeFile(preload, `import fs from 'node:fs';
+const mkdir = fs.mkdirSync;
+fs.mkdirSync = function (target, options) {
+  if (target === process.env.DENIED_INDEX_DIRECTORY) throw Object.assign(new Error('index directory is not writable'), { code: 'EPERM' });
+  return mkdir(target, options);
+};
+`);
+  const env = { ...process.env, HOME: home, SESSION_READER_NO_INDEX: '0', SESSION_READER_CALLER_SESSION: 'claude:caller', DENIED_INDEX_DIRECTORY: dir };
+  const args = ['--import', 'tsx', '--import', preload, 'bin/1session.ts'];
+  const run = (command: string[]) => promisify(execFile)(process.execPath, [...args, ...command], { env });
+  const result = await run(['turn', 'claude:cli-session', '1', '--json']);
+  assert.equal(JSON.parse(result.stdout).items[0].content, 'original question');
+  assert.match(result.stderr, /index.*not writable/i);
+  const direct = await run(['turn', 'claude:cli-session', '1', '--json', '--no-index']);
+  assert.deepEqual(JSON.parse(direct.stdout), JSON.parse(result.stdout));
+  assert.doesNotMatch(direct.stderr, /index.*not writable/i);
+  await assert.rejects(run(['index', '--all', '--global']), /index directory is not writable/);
+}));
 
 test('Claude preserves array user roles, native IDs, all existing titles and interleaved tool pairing', async () => fixture(async (_dir, add) => {
   const candidate = await add(claudeAdapter, 'claude-native.jsonl', [

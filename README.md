@@ -442,6 +442,8 @@ overview 的「末态」恰恰是最易腐的一段：
 
 `~/.1agents/session-reader/index.db`（SQLite，`SESSION_READER_DB` 可改）。任何命令碰到一个会话都会顺手索引它；`1session index --all` 做全库回填。
 
+索引因沙盒权限或只读文件系统无法打开、创建或写入时，搜索、列表和会话读取会自动降级为直接读取原始文件，并向 stderr 输出提示；stdout 的 JSON 格式不变。降级可能较慢，仍需原始会话的读取权限。也可用 `--no-index` 主动绕过索引，或在旧版本中重试。显式 `index` 和依赖索引的 `graph` 仍需可写索引；数据库损坏等其他错误会正常报出，无需复制数据库或删除 WAL/SHM 文件来绕过权限限制。
+
 ```
 L0  各家原始 JSONL                        ← 永远是唯一真相
 L1  归一事件  sessions / events

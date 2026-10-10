@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { adapters, listResolvedSessions, parseSince } from './resolver.js';
 import { turnNoAt, turnStarts } from './turns.js';
 import { canonicalizePath, isInside } from './util/paths.js';
+import { tryIndex } from './store/db.js';
 const DEFAULT_CONTEXT = 100;
 const DEFAULT_MAX_PER_SESSION = 5;
 const HARD_CAP = 200;
@@ -362,7 +363,8 @@ export async function searchSessions(query, options = {}) {
         throw new Error('regex and literal terms cannot be combined');
     const patterns = terms.map((term) => buildPattern(term, options));
     const direct = options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1';
-    const hits = direct ? await searchByParsing(options, patterns) : await searchByIndex(options, patterns);
+    const hits = direct ? await searchByParsing(options, patterns)
+        : await tryIndex(() => searchByIndex(options, patterns)) ?? await searchByParsing(options, patterns);
     hits.sort((a, b) => {
         const bestA = a.matches[0];
         const bestB = b.matches[0];

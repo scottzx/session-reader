@@ -66,6 +66,28 @@ machine. Read it when an install misbehaves or the user asks how to share this.
 The first real run parses every session (~10s for a few hundred); an index makes
 each call after that sub-second. A slow first call is that build, not a hang.
 
+## Read-only environments
+
+1session never writes to history files. Its default cache at
+`~/.1agents/session-reader/index.db` needs write access, including its SQLite
+WAL/SHM files. When the index cannot be opened or written because of permissions
+or a read-only filesystem, search, listing and session reads automatically fall
+back to the original files. A warning goes to stderr; JSON on stdout stays valid.
+The read may be slower and still requires access to the original session files.
+
+If an older installation fails with `attempt to write a readonly database`,
+`EACCES`, `EPERM` or `EROFS` for the index, retry the same read with `--no-index`:
+
+```bash
+1session search "blue-printer" --global --no-index
+```
+
+Do not rebuild the index, change permissions, copy or symlink a live database,
+or delete WAL/SHM files to work around a blocked cache. If the original session
+files are also inaccessible, report the denied source path. Explicit `index`
+and index-backed `graph` commands still need a writable index; corruption and
+other database errors are reported rather than triggering this fallback.
+
 ## Pick the command from the question
 
 Users ask about the past in a handful of shapes. Match the shape, don't run the

@@ -3,6 +3,7 @@ import { adapters, listResolvedSessions, parseSince, type ListOptions } from './
 import { turnNoAt, turnStarts } from './turns.js';
 import { canonicalizePath, isInside } from './util/paths.js';
 import type { NormalizedSession, SessionRef, TurnKind } from './types.js';
+import { tryIndex } from './store/db.js';
 
 export interface SearchOptions extends ListOptions {
   /** Bypass the index and parse every candidate from disk. */
@@ -429,7 +430,8 @@ export async function searchSessions(query: string, options: SearchOptions = {})
   if (options.regex && options.terms?.length) throw new Error('regex and literal terms cannot be combined');
   const patterns = terms.map((term) => buildPattern(term, options));
   const direct = options.useIndex === false || process.env.SESSION_READER_NO_INDEX === '1';
-  const hits = direct ? await searchByParsing(options, patterns) : await searchByIndex(options, patterns);
+  const hits = direct ? await searchByParsing(options, patterns)
+    : await tryIndex(() => searchByIndex(options, patterns)) ?? await searchByParsing(options, patterns);
   hits.sort((a, b) => {
     const bestA = a.matches[0]; const bestB = b.matches[0];
     return (bestA && bestB ? compare(bestA, bestB, options) : bestA ? -1 : bestB ? 1 : 0)
