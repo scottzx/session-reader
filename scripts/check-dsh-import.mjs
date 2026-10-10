@@ -38,16 +38,30 @@ assert.throws(() => {
 
 // Exercise the actual Cordis loader: every inject entry is a required service.
 const { Context } = await import(pathToFileURL(resolve(root, 'vendor/cordis/lib/index.js')).href);
+const { default: SystemPrompt } = await import(pathToFileURL(resolve(root, 'packages/core/system-prompt/lib/index.js')).href);
+const { default: ToolRuntime, assertObjectJsonSchema, validateJsonSchemaValue } = await import(pathToFileURL(resolve(root, 'packages/core/tools/lib/index.js')).href);
 const plugin = await import('../dist/src/dsh/plugin.js');
 const ctx = new Context();
 let route;
-for (const name of ['tools', 'webServer', 'sessionController', 'workspaceRegistry']) {
+await ctx.plugin(SystemPrompt);
+await ctx.plugin(ToolRuntime);
+for (const name of ['webServer', 'sessionController', 'workspaceRegistry']) {
   ctx.provide(name, { register(value) { if (name === 'webServer') route = value; return () => {}; } });
 }
 try {
   const fiber = ctx.plugin(plugin);
   await fiber.await();
   fiber.assertActive();
+  const schemas = JSON.parse(JSON.stringify(ctx.tools.schemas()));
+  assert.equal(schemas.length, 5);
+  for (const tool of schemas) {
+    assertObjectJsonSchema(tool.parameters);
+    const required = tool.name === 'session_search' ? 'query' : 'sessionId';
+    assert.deepEqual(validateJsonSchemaValue(tool.parameters, { [required]: 'fixture' }), []);
+    assert.ok(validateJsonSchemaValue(tool.parameters, {}).length > 0, `${tool.name} requires ${required}`);
+    assert.ok(validateJsonSchemaValue(tool.parameters, { [required]: 42 }).length > 0, `${tool.name} rejects a non-string ${required}`);
+  }
+  console.log('DSH exposes five object JSON Schemas and validates their required arguments');
   assert.ok(route, 'history route must load without ACP');
   const request = { url: '/api/session-reader/continuation?provider=codex', headers: { host: 'localhost' }, method: 'GET' };
   const response = { setHeader() {}, end(value) { this.body = JSON.parse(value); } };
