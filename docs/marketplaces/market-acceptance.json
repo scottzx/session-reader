@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at_utc": "2026-10-12T09:51:23.138539+00:00",
+  "checked_at_utc": "2026-10-15T01:45:10.034426+00:00",
   "package": {
     "name": "@1agents/session-reader",
     "version": "0.8.6",
@@ -106,6 +106,53 @@
         "temporary_environment_and_local_credentials_removed": true,
         "original_DSH_head_status_and_diff_unchanged": true
       }
+    },
+    {
+      "channel": "dsh-pub",
+      "status": "passed",
+      "version": "0.8.6",
+      "listing_url": "https://dsh.pub/en/plugins/session-reader/",
+      "listing_type": "community-automated",
+      "public_search_exact_results": 1,
+      "advertised_command": "npx dshpub add scottzx/session-reader --ref f006816b2b7819ee02f033fd0c941965f7eb0159",
+      "actual_npx_cli": "dshpub@0.1.1",
+      "installed_package": "@1agents/session-reader",
+      "resolved_source_commit": "f006816b2b7819ee02f033fd0c941965f7eb0159",
+      "npm_build_source_commit": "576d68e60f3a4549576aa22c8dc89d5b17bdd86b",
+      "resolved_docs_commit_is_not_npm_build_source": true,
+      "git_lock_matches_exact_codeload_sha512": true,
+      "independent_HOME_DSH_HOME_and_fresh_web_profile": true,
+      "bundle_enabled": true,
+      "Cordis_Loader_and_ClientModuleRegistry_active": true,
+      "client_http_status": 200,
+      "client_matches_installed_bytes": true,
+      "api": {
+        "browse_sessions": 3,
+        "codex_filter_sessions": 1,
+        "search_matches": 2,
+        "directory_and_original_text": true,
+        "five_checks_http200": true
+      },
+      "browser": {
+        "browse_sessions": 3,
+        "codex_filter_sessions": 1,
+        "search_matches": 2,
+        "original_text_highlight": true,
+        "completed_reader_requests_http200": 7
+      },
+      "readonly_index": {
+        "repeated_for_this_channel": false,
+        "separate_previous_two_market_cases_preserved": true
+      },
+      "cleanup": {
+        "servers_stopped_and_ports_closed": true,
+        "owned_browser_session_stopped": true,
+        "temporary_environment_and_local_credentials_removed": true,
+        "original_DSH_head_status_and_diff_unchanged": true
+      },
+      "manual_form_submission_received": false,
+      "manual_submission_CAPTCHA_history_preserved": true,
+      "CLI_telemetry_disabled": true
     }
   ],
   "pending_channels": [
