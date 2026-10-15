@@ -158,8 +158,7 @@
   "pending_channels": [
     "canonical / dsh-market",
     "DSH Plugin Store",
-    "DSH STORE",
-    "dsh.pub"
+    "DSH STORE"
   ],
   "historical_084_085_receipts_and_acceptance_preserved": true,
   "authorization": {
