@@ -129,6 +129,23 @@ test('projects page after complete discovery, including more than the raw scan b
   }
 }));
 
+test('Codex project creation time comes from session metadata and refreshes an older index', async () => fixture(async (_dir, add) => {
+  const createdAt = '2026-10-03T16:52:02.360Z';
+  const recordedAt = '2026-10-03T16:52:02.797Z';
+  const candidate = await add(codexAdapter, 'codex-creation-time.jsonl', [
+    { type: 'session_meta', timestamp: recordedAt, payload: { cwd: '/tmp/ws', timestamp: createdAt } },
+  ]);
+  assert.equal((await codexAdapter.scanRef(candidate)).createdAt, createdAt);
+  assert.equal((await codexAdapter.parse(candidate)).ref.createdAt, createdAt);
+  const db = await openStore();
+  const { id } = await indexSession(db, { adapter: codexAdapter, candidate });
+  db.prepare('UPDATE sessions SET started_at = ?, parser_version = parser_version - 1 WHERE id = ?').run(recordedAt, id);
+  const indexed = await listProjects();
+  assert.deepEqual(indexed, await listProjects({ useIndex: false }));
+  assert.equal(indexed.projects[0]!.updatedAt, createdAt);
+  assert.equal(sessionRow(db, id)!.started_at, createdAt);
+}));
+
 test('projects validate pagination and return an empty page for no workspaces', async () => fixture(async () => {
   for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
     await assert.rejects(listProjects({ page: value }), /page must be a positive safe integer/);

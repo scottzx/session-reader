@@ -253,6 +253,8 @@ export const codexAdapter: ProviderAdapter = {
       const native = typeof line.ordinal === 'number' ? `ordinal:${line.ordinal}` : typeof payload.id === 'string' ? payload.id : undefined;
       sources.record(raw, native, typeof payload.id === 'string' ? payload.id : undefined, undefined, typeof payload.turn_id === 'string' ? payload.turn_id : undefined);
       const timestamp = line.timestamp;
+      // Session creation can precede the timestamp of the metadata record itself.
+      if (line.type === 'session_meta' && typeof payload.timestamp === 'string') createdAt ??= payload.timestamp;
       if (timestamp) {
         createdAt ??= timestamp;
         updatedAt = timestamp;
