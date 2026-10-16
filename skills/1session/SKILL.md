@@ -97,6 +97,7 @@ whole ladder by reflex:
 | --- | --- |
 | "what have I been doing / what sessions exist" | `list` |
 | "what projects have the agents worked on / which projects are recent" | `projects` |
+| "how did projects evolve week by week / merge agents into one project" | `projects --weekly --timezone Asia/Shanghai` (or the user's IANA zone) |
 | "where did I discuss X" (a word, path, error string, package name) | `search` |
 | "what happened in that session" (they named or you found one) | `overview` |
 | "find where we talked about X / which turn was that" | `turns` |

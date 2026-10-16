@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { aggregateWorkspaceSessions } from '../src/aggregator.js';
 import { distillSession } from '../src/distiller.js';
@@ -7,7 +7,7 @@ import { buildOverview } from '../src/overview.js';
 import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../src/reader.js';
 import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { listRecentSessions, loadSession } from '../src/resolver.js';
-import { listProjects } from '../src/projects.js';
+import { listProjects, listProjectWeeks, type ProjectOptions } from '../src/projects.js';
 import { searchSessions } from '../src/search.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
@@ -17,8 +17,9 @@ import type { DigestFocus, FileGroup, NormalizedSession, TurnKind } from '../src
 const USAGE = `1session — cross-agent session Read Plane
 
   1session list [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--since 24h] [--json]
-  1session projects [--page <n>] [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--json]
-                          从历史工作目录推导项目，按最新会话创建时间倒序（默认 global）
+  1session projects [--weekly] [--page <n>] [--limit <n>] [--scope <path>|cwd|global] [--provider <name>]
+                          [--project-map <file.json>] [--timezone <IANA zone>] [--json]
+                          跨智能体合并项目；--weekly 按周统计，均从新到旧分页（默认 global）
   1session overview <session-id> [--json]              第 1 层：会话概要
   1session turns <session-id> [--json]                 第 2 层：逐轮概要
   1session turn <session-id> <n|a-b|a,b,c> [--event <k|a-b|a,b,c>] [--locator <ref>] [--raw]
@@ -67,7 +68,7 @@ interface Args {
 /** Flags that never take a value, so they cannot swallow a positional. */
 const BOOLEAN_FLAGS = new Set([
   'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index', 'global',
-  'copy', 'dry-run', 'no-report', 'include-self', 'open',
+  'copy', 'dry-run', 'no-report', 'include-self', 'open', 'weekly',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -172,18 +173,40 @@ async function main(): Promise<void> {
 
   switch (command) {
     case 'projects': {
-      const result = await listProjects({
+      for (const name of ['project-map', 'timezone']) {
+        if (flags[name] !== undefined && !str(flags[name])?.trim()) throw new Error(`--${name} requires a value`);
+      }
+      if (flags.timezone !== undefined && !flags.weekly) throw new Error('--timezone requires --weekly');
+      const options: ProjectOptions = {
         page: flags.page === undefined ? undefined : num(flags.page) ?? NaN,
         limit: flags.limit === undefined ? undefined : num(flags.limit) ?? NaN,
         workspace: scopeWorkspace({ scope: 'global', ...flags }),
         provider: str(flags.provider) as never,
         useIndex,
-      });
+        ...(str(flags['project-map']) ? { projectMap: JSON.parse(readFileSync(canonicalizePath(str(flags['project-map'])!), 'utf8')) } : {}),
+      };
+      if (flags.weekly === true) {
+        const result = await listProjectWeeks({ ...options, timeZone: str(flags.timezone) });
+        print(json, result, [
+          `周度项目统计 · ${result.timeZone} · 周一至周日 · 按会话创建时间`,
+          ...result.weeks.flatMap(week => [
+            `${week.week} — ${week.endDate}  活跃 ${week.projectCount}  首次出现 ${week.newProjectCount}  累计 ${week.cumulativeProjectCount}  会话 ${week.sessionCount}`,
+            ...week.projects.map(project => `  ${project.isNew ? '[首次]' : '[既有]'} ${project.name}  ${project.sessionCount} 会话  ` +
+              project.providers.map(provider => `${provider}:${project.providerSessionCounts[provider]}`).join(',') + `  ${project.workspace}`),
+          ]),
+          ...(result.weeks.length ? [] : ['(no dated project sessions found)']),
+          ...(result.undatedSessionCount ? [`未计入周度统计：${result.undatedSessionCount} 条会话缺少有效创建时间`] : []),
+          `第 ${result.page} 页 · 每页 ${result.limit} 周 · 共 ${result.total} 周` +
+            (result.hasMore ? ` · 下一页：--page ${result.nextPage}` : ''),
+        ].join('\n'));
+        break;
+      }
+      const result = await listProjects(options);
       print(json, result, [
-        '项目名  最近修改时间（最新会话创建时间）  智能体  会话数  项目路径',
+        '项目名  最近修改时间（最新会话创建时间）  智能体  会话数  历史目录数  项目路径',
         ...result.projects.map((project) =>
           `${project.name}  ${project.updatedAt ?? '?'}  ${project.providers.join(',')}  ` +
-          `${project.sessionCount}  ${project.workspace}`,
+          `${project.sessionCount}  ${project.workspaces.length}  ${project.workspace}`,
         ),
         ...(result.projects.length ? [] : ['(no projects found)']),
         `第 ${result.page} 页 · 每页 ${result.limit} 个 · 共 ${result.total} 个项目` +

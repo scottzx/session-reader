@@ -48,23 +48,49 @@ workspace basename, title.
 ### `projects`
 
 ```
-1session projects [--page n] [--limit n] [--scope <path>|cwd|global] [--global]
+1session projects [--weekly] [--page n] [--limit n] [--scope <path>|cwd|global] [--global]
+                  [--project-map file.json] [--timezone Asia/Shanghai]
                   [--provider claude|codex|antigravity|grok|dsh] [--json]
 ```
 
-Defaults to all projects, page 1, 20 projects per page. Groups sessions from all
-providers by canonical workspace path; the final directory name is the project
-name. Same-named directories at different paths remain separate projects.
-Columns: name, last-modified time, providers, session count, full workspace path.
+Defaults to all projects, page 1, 20 projects per page. Merges providers by
+canonical workspace, Git repository (including subdirectories and worktrees),
+and normalized origin across clones. SSH and HTTPS origins match; credentials
+are omitted. Nested repositories and forks remain separate. Same-named paths
+without repository evidence remain separate. Names come from the origin repo,
+repository root, or final workspace directory, in that order.
+Columns: name, last-modified time, providers, session count, directory count, representative path.
 Last-modified time means the newest **session creation time**, never file mtime
 or the last transcript event. Undated projects sort last; ties sort by path.
 Sessions without a workspace are omitted; historical paths need not still exist.
 
 Grouping and sorting happen before pagination. `--page` and `--limit` must be
 positive integers. JSON returns `{ projects, total, page, limit, hasMore, nextPage? }`;
-each project has `name`, `workspace`, `updatedAt?`, `sessionCount`, and `providers`.
+Each project has `id`, `name`, `workspace`, `workspaces`, `mergeSource`
+(`workspace`, `git`, or `mapping`), `createdAt?`, `updatedAt?`, `sessionCount`, and `providers`.
 The final page omits `nextPage`; pages past the end return an empty `projects`
 array with the original total. Use `--scope cwd` to narrow to the current subtree.
+
+`--project-map file.json` explicitly merges moved/deleted paths that Git cannot
+identify. The JSON array contains `{ id, name, workspaces: [path, ...] }` entries.
+IDs and canonical paths must be unique; longest subtree prefix wins, so an
+independent nested project can override its parent. The first path is the
+representative. Mappings override Git resolution; relative paths resolve from
+the command's working directory. History is never changed.
+
+`--weekly` pages **weeks**, newest first, using session creation time and local
+Monday–Sunday boundaries. Defaults to the machine's zone; `--timezone` accepts
+an IANA zone and requires `--weekly`. Includes empty weeks between first and last
+dated records. Identity and first appearance use the complete selected scope
+before pagination; provider/scope filters change that sample.
+JSON returns `{ weeks, total, page, limit, hasMore, nextPage?, timeZone, undatedSessionCount }`.
+Each week has `week`, `endDate`, `projectCount`, `newProjectCount`,
+`cumulativeProjectCount`, `sessionCount`, `providerSessionCounts`, and `projects`.
+Each weekly project has `id`, `name`, `workspace`, `sessionCount`, `providers`,
+`providerSessionCounts`, and `isNew`. Projects sort by session count, then ID.
+Missing/invalid creation times are counted only in `undatedSessionCount`.
+Counts include empty/test/review sessions with a workspace. First appearance
+is not a launch date; blank weeks are not proof of inactivity or cancellation.
 
 ### `search`
 

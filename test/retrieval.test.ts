@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { adapters, listRecentSessions, loadSession, resolveSession } from '../src/resolver.js';
-import { listProjects } from '../src/projects.js';
+import { listProjects, listProjectWeeks } from '../src/projects.js';
 import { claudeAdapter } from '../src/parsers/claude.js';
 import { codexAdapter } from '../src/parsers/codex.js';
 import { dshAdapter } from '../src/parsers/dsh.js';
@@ -94,6 +94,12 @@ test('projects merge all five providers by path and use creation time rather tha
   assert.equal(shared.sessionCount, 5);
   assert.equal(shared.updatedAt, '2026-01-05T00:00:00.000Z');
   assert.deepEqual(shared.providers, ['antigravity', 'claude', 'codex', 'dsh', 'grok']);
+  const weekly = await listProjectWeeks({ timeZone: 'UTC' });
+  assert.deepEqual(weekly, await listProjectWeeks({ timeZone: 'UTC', useIndex: false }));
+  assert.equal(weekly.total, 2, 'late transcript writes must not extend the weekly calendar');
+  const sharedWeeks = weekly.weeks.flatMap(week => week.projects.filter(project => project.id === shared.id));
+  assert.equal(sharedWeeks.reduce((sum, project) => sum + project.sessionCount, 0), 5);
+  assert.deepEqual([...new Set(sharedWeeks.flatMap(project => project.providers))].sort(), shared.providers);
   assert.equal(indexed.projects.at(-1)!.updatedAt, undefined);
   const scoped = await listProjects({ workspace: '/tmp/project-list' });
   assert.equal(scoped.total, 4);
@@ -150,8 +156,110 @@ test('projects validate pagination and return an empty page for no workspaces', 
   for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
     await assert.rejects(listProjects({ page: value }), /page must be a positive safe integer/);
     await assert.rejects(listProjects({ limit: value }), /limit must be a positive safe integer/);
+    await assert.rejects(listProjectWeeks({ page: value }), /page must be a positive safe integer/);
+    await assert.rejects(listProjectWeeks({ limit: value }), /limit must be a positive safe integer/);
   }
   assert.deepEqual(await listProjects(), { projects: [], total: 0, page: 1, limit: 20, hasMore: false });
+  assert.deepEqual(await listProjectWeeks({ timeZone: 'UTC' }), {
+    weeks: [], total: 0, page: 1, limit: 20, hasMore: false, timeZone: 'UTC', undatedSessionCount: 0,
+  });
+  await assert.rejects(listProjectWeeks({ timeZone: 'not/a-zone' }), /time zone/i);
+}));
+
+test('projects merge repository subdirectories, clones and worktrees while keeping nested repositories and forks separate', async () => fixture(async (dir, add) => {
+  const runGit = (cwd: string, args: string[]) => promisify(execFile)('git', ['-C', cwd, ...args]);
+  const main = path.join(dir, 'main'), clone = path.join(dir, 'clone'), fork = path.join(dir, 'fork'), nested = path.join(main, 'nested');
+  for (const repo of [main, clone, fork, nested]) { await fs.mkdir(repo, { recursive: true }); await runGit(repo, ['init']); }
+  await runGit(main, ['remote', 'add', 'origin', 'https://user:SECRET@github.com/example/shared.git']);
+  await runGit(clone, ['remote', 'add', 'origin', 'git@github.com:example/shared.git']);
+  await runGit(fork, ['remote', 'add', 'origin', 'https://github.com/someone/shared.git']);
+  await runGit(main, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture']);
+  const worktree = path.join(dir, 'worktree');
+  await runGit(main, ['worktree', 'add', '--detach', worktree]);
+  for (const [name, cwd] of [['main', main], ['sub', path.join(main, 'src')], ['clone', clone], ['worktree', worktree], ['fork', fork], ['nested', nested]]) {
+    await add(claudeAdapter, `repo-${name}.jsonl`, [{ ...user('question', 'u1'), cwd }]);
+  }
+  await add(codexAdapter, 'repo-codex.jsonl', [{ type: 'session_meta', timestamp: '2026-01-02T00:00:00Z', payload: { cwd: path.join(worktree, 'src') } }]);
+  for (const useIndex of [true, false]) {
+    const result = await listProjects({ useIndex });
+    assert.equal(result.total, 3);
+    const shared = result.projects.find(p => p.id === 'git:github.com/example/shared')!;
+    assert.equal(shared.sessionCount, 5);
+    assert.equal(shared.workspaces.length, 5);
+    assert.deepEqual(shared.providers, ['claude', 'codex']);
+    assert.equal(shared.mergeSource, 'git');
+    assert.equal(shared.createdAt, '2026-01-01T00:00:00.000Z');
+    assert.ok(!JSON.stringify(result).includes('SECRET'));
+    assert.equal(result.projects.find(p => p.workspace === fsSync.realpathSync(nested))!.sessionCount, 1);
+  }
+}));
+
+test('explicit project maps join historical paths with longest-prefix overrides and validate identities', async () => fixture(async (_dir, add) => {
+  for (const cwd of ['/tmp/old-app', '/tmp/new-app', '/tmp/old-app/src', '/tmp/old-app/module', '/tmp/old-app-other']) {
+    await add(claudeAdapter, `map-${path.basename(cwd)}.jsonl`, [{ ...user('question', 'u1'), cwd }]);
+  }
+  const projectMap = [
+    { id: 'app', name: '统一项目', workspaces: ['/tmp/new-app', '/tmp/old-app'] },
+    { id: 'module', name: '独立模块', workspaces: ['/tmp/old-app/module'] },
+  ];
+  const indexed = await listProjects({ projectMap });
+  assert.deepEqual(indexed, await listProjects({ projectMap, useIndex: false }));
+  assert.equal(indexed.total, 3);
+  const app = indexed.projects.find(p => p.id === 'mapped:app')!;
+  assert.equal(app.name, '统一项目'); assert.equal(app.sessionCount, 3);
+  assert.deepEqual(app.workspaces, ['/tmp/new-app', '/tmp/old-app', '/tmp/old-app/src']);
+  assert.equal(app.mergeSource, 'mapping');
+  for (const invalid of [null, {}, [{ id: 'x', name: 'bad', workspaces: [] }], [...projectMap, projectMap[0]],
+    [...projectMap, { id: 'duplicate-path', name: 'bad', workspaces: ['/tmp/old-app'] }]]) {
+    await assert.rejects(listProjects({ projectMap: invalid as never }), /project map/);
+  }
+}));
+
+test('weekly projects use creation time, local Monday boundaries, complete history and empty weeks before pagination', async () => fixture(async (_dir, add) => {
+  for (const [name, cwd, at] of [
+    ['sunday', '/tmp/old-weekly', '2026-01-04T15:59:59Z'],
+    ['monday', '/tmp/new-weekly', '2026-01-04T16:00:00Z'],
+    ['another', '/tmp/another-weekly', '2026-01-05T00:00:00Z'],
+    ['return', '/tmp/new-weekly', '2026-01-26T00:00:00Z'],
+    ['invalid', '/tmp/new-weekly', 'invalid'],
+  ]) {
+    await add(claudeAdapter, `weekly-${name}.jsonl`, [{ ...user('question', 'u1', at), cwd }, assistant('late update', 'a1', '2026-12-31T00:00:00Z')]);
+  }
+  await add(codexAdapter, 'weekly-codex.jsonl', [{ type: 'session_meta', timestamp: '2026-02-01T00:00:00Z', payload: { timestamp: '2026-01-04T16:00:00Z', cwd: '/tmp/old-weekly' } }]);
+  const options = { timeZone: 'Asia/Shanghai', projectMap: [{ id: 'same', name: '同一项目', workspaces: ['/tmp/old-weekly', '/tmp/new-weekly'] }] };
+  const result = await listProjectWeeks(options);
+  assert.deepEqual(result, await listProjectWeeks({ ...options, useIndex: false }));
+  assert.equal(result.undatedSessionCount, 1);
+  assert.equal(result.total, 5);
+  assert.deepEqual(result.weeks.map(w => w.week), ['2026-01-26', '2026-01-19', '2026-01-12', '2026-01-05', '2025-12-29']);
+  assert.deepEqual(result.weeks.map(w => w.projectCount), [1, 0, 0, 2, 1]);
+  assert.deepEqual(result.weeks.map(w => w.newProjectCount), [0, 0, 0, 1, 1]);
+  assert.deepEqual(result.weeks.map(w => w.cumulativeProjectCount), [2, 2, 2, 2, 1]);
+  assert.deepEqual(result.weeks[3]!.providerSessionCounts, { claude: 2, codex: 1 });
+  assert.equal(result.weeks[3]!.projects[0]!.sessionCount, 2);
+  assert.equal(result.weeks[3]!.projects[0]!.isNew, false);
+  assert.equal(result.weeks[4]!.endDate, '2026-01-04');
+  const first = await listProjectWeeks({ ...options, limit: 2 });
+  const second = await listProjectWeeks({ ...options, limit: 2, page: 2 });
+  const last = await listProjectWeeks({ ...options, limit: 2, page: 3 });
+  assert.deepEqual([...first.weeks, ...second.weeks, ...last.weeks], result.weeks);
+  assert.equal(first.nextPage, 2); assert.equal(second.nextPage, 3); assert.equal(last.nextPage, undefined);
+  assert.deepEqual((await listProjectWeeks({ ...options, page: 4, limit: 2 })).weeks, []);
+  const utc = await listProjectWeeks({ ...options, timeZone: 'UTC' });
+  assert.equal(utc.weeks.at(-1)!.sessionCount, 3, 'Sunday UTC stays in the previous week');
+  const scoped = await listProjectWeeks({ ...options, provider: 'codex', workspace: '/tmp/old-weekly' });
+  assert.equal(scoped.total, 1); assert.equal(scoped.weeks[0]!.projects[0]!.isNew, true);
+  assert.equal(scoped.weeks[0]!.sessionCount, 1);
+}));
+
+test('weekly calendar boundaries follow DST and leap days in the selected IANA zone', async () => fixture(async (_dir, add) => {
+  for (const [name, at] of [['leap', '2024-02-29T12:00:00Z'], ['sun', '2024-03-11T03:59:59Z'], ['mon', '2024-03-11T04:00:00Z']]) {
+    await add(claudeAdapter, `calendar-${name}.jsonl`, [{ ...user('question', 'u1', at), cwd: '/tmp/calendar' }]);
+  }
+  const result = await listProjectWeeks({ timeZone: 'America/New_York' });
+  assert.deepEqual(result.weeks.map(w => [w.week, w.endDate, w.sessionCount]), [
+    ['2024-03-11', '2024-03-17', 1], ['2024-03-04', '2024-03-10', 1], ['2024-02-26', '2024-03-03', 1],
+  ]);
 }));
 
 test('projects CLI defaults to all projects, supports pages and scope, and validates flags', async () => fixture(async (dir) => {
@@ -185,6 +293,22 @@ test('projects CLI defaults to all projects, supports pages and scope, and valid
   assert.match(text, /共 2 个项目.*下一页：--page 2/);
   for (const flags of [['--page', 'bad'], ['--limit', '0'], ['--page']]) {
     await assert.rejects(run(flags), /must be a positive safe integer/);
+  }
+  const mapFile = path.join(dir, 'project-map.json');
+  await fs.writeFile(mapFile, JSON.stringify([{ id: 'joined', name: 'Merged project', workspaces: [local, sibling] }]));
+  const merged = JSON.parse((await run(['--project-map', mapFile, '--json'])).stdout);
+  assert.equal(merged.total, 1); assert.equal(merged.projects[0].sessionCount, 2);
+  const weekFlags = ['--weekly', '--timezone', 'Asia/Shanghai', '--project-map', mapFile, '--limit', '1'];
+  const weekly = JSON.parse((await run([...weekFlags, '--json'])).stdout);
+  assert.equal(weekly.timeZone, 'Asia/Shanghai'); assert.equal(weekly.total, 1);
+  assert.equal(weekly.weeks[0].week, '2025-12-29'); assert.equal(weekly.weeks[0].projectCount, 1);
+  assert.equal(weekly.weeks[0].sessionCount, 2); assert.equal(weekly.weeks[0].projects[0].name, 'Merged project');
+  assert.deepEqual(weekly, JSON.parse((await run([...weekFlags, '--json', '--no-index'])).stdout));
+  const emptyPage = JSON.parse((await run([...weekFlags, '--json', '--page', '2'])).stdout);
+  assert.deepEqual(emptyPage.weeks, []); assert.equal(emptyPage.total, 1); assert.equal(emptyPage.hasMore, false);
+  assert.match((await run(weekFlags)).stdout, /共 1 周/);
+  for (const flags of [['--weekly', '--timezone'], ['--weekly', '--timezone', 'invalid'], ['--project-map'], ['--timezone', 'UTC']]) {
+    await assert.rejects(run(flags), /requires|time zone/i);
   }
 }));
 

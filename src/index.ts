@@ -90,7 +90,10 @@ export {
   type SearchOptions,
 } from './search.js';
 export { aggregateWorkspaceSessions, type AggregateOptions } from './aggregator.js';
-export { listProjects, type ProjectSummary, type ProjectOptions, type ProjectPage } from './projects.js';
+export {
+  listProjects, listProjectWeeks, type ProjectSummary, type ProjectOptions, type ProjectPage,
+  type ProjectMapping, type ProjectWeekActivity, type ProjectWeek, type ProjectWeekOptions, type ProjectWeekPage,
+} from './projects.js';
 export type { ProviderAdapter, SessionCandidate } from './parsers/provider.js';
 export { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
 export { defaultDbPath, openStore, resetStoreCache } from './store/db.js';

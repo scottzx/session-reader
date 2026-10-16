@@ -115,7 +115,7 @@ npm run build && node dist/bin/1session.js <command>
 | 命令 | 说明 |
 | --- | --- |
 | `1session list [--limit n] [--scope <path>\|cwd\|global] [--provider name] [--since 24h] [--json]` | 按最近更新列出各智能体的会话（默认当前 pwd 子树，见 `--scope`） |
-| `1session projects [--page n] [--limit n] [--scope <path>\|cwd\|global] [--provider name] [--json]` | 从历史工作目录推导项目名，按最新会话创建时间倒序分页（默认全部项目） |
+| `1session projects [--weekly] [--page n] [--limit n] [--project-map file.json] [--timezone zone] [--scope <path>\|cwd\|global] [--provider name] [--json]` | 跨智能体合并项目，或按周统计项目历程，从新到旧分页（默认全部项目） |
 | `1session overview <session-id> [--json]` | **第 1 层**：统计卡片（轮次/文件/命令/提交/产物/上传/后台任务/token）+ 目标、口径修正、状态锚点、全量落盘 |
 | `1session turns <session-id> [--json]` | **第 2 层**：逐轮概要——时间、耗时、事件区间、文件/命令/失败数、用户说了什么、agent 回了什么 |
 | `1session turn <session-id> <n> [--event k\|a-b\|a,b,c] [--json]` | **第 3 层**：默认读取用户与助手的可见正文、附工具目录；支持批量轮次、`--locator`、`--call`、`--artifact`、`--raw` 和游标分页 |
@@ -132,25 +132,59 @@ npm run build && node dist/bin/1session.js <command>
 
 全局开关 `--no-index` 绕过索引直读源文件。
 
-### 项目列表与分页
+### 跨智能体项目合并、周度统计与分页
 
 ```bash
 1session projects                           # 全部智能体的项目，第 1 页，每页 20 个
 1session projects --page 2 --limit 10        # 第 2 页，每页 10 个项目
 1session projects --scope .. --provider codex --json
+1session projects --weekly --timezone Asia/Shanghai --page 1 --limit 4 --json
+1session projects --project-map projects.json --weekly --timezone Asia/Shanghai
 ```
 
-项目以归一化后的完整工作目录去重，项目名取目录末级名称；不同路径的同名项目分别保留，
-不同智能体在同一路径下的会话合并。输出项目名、最近修改时间、智能体、会话数和完整路径。
+项目跨智能体归并：同一完整工作目录、同一 Git 仓库的子目录和 worktree 合并；
+同一 `origin` 的克隆也合并，SSH / HTTPS 地址归一化且不输出 URL 凭据。
+独立嵌套仓库、不同 origin 的 fork 和没有仓库依据的同名目录分别保留。
+Git 项目名取 origin 的仓库名，无 origin 时取仓库根目录名；普通项目取工作目录末级名称。
+输出项目名、最近修改时间、智能体、会话数、历史目录数和项目路径。
 这里的「最近修改时间」取该项目最新的**会话创建时间**，不取会话文件的修改时间。
 没有创建时间的项目显示 `?` 并排在最后；无法恢复工作目录的会话不计入项目列表。
-历史目录即使已经删除，仍可从会话中列出。时间相同时按完整路径排序。
+历史目录即使已经删除，仍可从会话中列出。时间相同时按项目路径排序。
 
 `projects` 默认跨全部项目，`--scope cwd` 可限定当前目录子树。先聚合、排序，再按项目分页，
 `--page` 从 1 开始，`--limit` 默认 20，两者须为正整数。
 JSON 返回 `{ projects, total, page, limit, hasMore, nextPage? }`；每个项目包含
-`name`、`workspace`、`updatedAt?`、`sessionCount` 和 `providers`。末页省略 `nextPage`，
+`id`、`name`、`workspace`、`workspaces`、`mergeSource`、`createdAt?`、`updatedAt?`、`sessionCount`
+和 `providers`。`workspace` 是代表路径，`workspaces` 保留全部观测到的历史工作目录；
+`mergeSource` 为 `workspace`、`git` 或 `mapping`。末页省略 `nextPage`，
 超出末页返回空 `projects` 并保留总数。
+
+已迁移、删除或重命名且无法通过 Git 确认的目录，可用 `--project-map projects.json` 显式合并。
+文件内容为数组，`id` 和工作目录不能重复；嵌套规则按最长目录前缀匹配，可将独立子项目单独保留：
+
+```json
+[
+  { "id": "app", "name": "统一项目", "workspaces": ["/work/current/app", "/work/old/app"] },
+  { "id": "reader", "name": "会话读取工具", "workspaces": ["/work/services/reader", "/work/old/app/modules/reader"] }
+]
+```
+
+映射优先于自动 Git 归并，不依据同名或对话文字猜测身份。相对路径相对于 CLI 当前目录解析，
+建议使用绝对路径。映射只影响查询结果，不修改历史文件。
+
+`--weekly` 按每条会话的**创建时间**统计周一至周日，默认使用本机时区，
+`--timezone Asia/Shanghai` 可显式选择 IANA 时区。先对所选范围的完整历史合并项目，
+再按自然周倒序分页；`--limit` 此时是每页周数。首末记录之间的空白周也保留。
+`--scope` 和 `--provider` 限定统计样本，因此首次出现和累计数也以所选样本为准。
+
+周度 JSON 返回 `{ weeks, total, page, limit, hasMore, nextPage?, timeZone, undatedSessionCount }`。
+每周包含 `week`、`endDate`、`projectCount`（活跃项目数）、`newProjectCount`（首次出现）、
+`cumulativeProjectCount`（累计）、`sessionCount`、`providerSessionCounts` 和 `projects`。
+周内项目按会话数倒序，含统一项目 `id`、名称、代表路径、会话数、各智能体数量和 `isNew`。
+缺少有效创建时间的会话不计入周度统计，在 `undatedSessionCount` 中单列。
+
+统计包含可归属工作目录的全部会话文件，不自动剔除空会话、测试或审批回放。
+首次出现不等于实际立项，空白周不等于停工，会话数量不等于工时；最近一周可能尚未结束。
 
 ### 关键词、ID 与原文读取
 
@@ -332,6 +366,7 @@ T 3 2026-09-11T13:03:29 (283s)  事件 29–45  文件 1 · 命令 7 · 失败 0
 import {
   listRecentSessions,
   listProjects,
+  listProjectWeeks,
   findSessionsByWorkspace,
   loadSession,
   parseSession,
@@ -347,6 +382,7 @@ import {
 
 const sessions = await findSessionsByWorkspace(process.cwd(), { since: '7d' });
 const projects = await listProjects({ page: 1, limit: 20 });
+const weeks = await listProjectWeeks({ timeZone: 'Asia/Shanghai', page: 1, limit: 4 });
 const digest = distillSession(await parseSession(sessions[0].id), { focus: 'marketing' });
 const story = await aggregateWorkspaceSessions(process.cwd(), { since: '24h' });
 const hits = await searchSessions('小红书', { workspace: process.cwd(), since: '24h', kinds: ['user'] });
