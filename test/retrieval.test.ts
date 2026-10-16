@@ -62,7 +62,7 @@ test('projects merge all five providers by path and use creation time rather tha
   await add(codexAdapter, 'codex-project.jsonl', [
     { type: 'session_meta', timestamp: '2026-01-02T00:00:00Z', payload: { cwd: workspace } },
   ]);
-  await add(antigravityAdapter, 'antigravity-project/transcript.jsonl', [
+  await add(antigravityAdapter, 'antigravity-project/.system_generated/logs/transcript.jsonl', [
     { type: 'GENERIC', created_at: '2026-01-03T00:00:00Z', tool_calls: [{ name: 'run_command', args: { Cwd: workspace } }] },
   ]);
   await add(dshAdapter, 'dsh-project/session.v2.jsonl', [
