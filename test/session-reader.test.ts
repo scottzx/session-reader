@@ -440,29 +440,6 @@ test('workspaceFromTrajectoryBlob reads the folder Antigravity opened', () => {
   assert.equal(workspaceFromTrajectoryBlob(chatOnly), undefined);
 });
 
-test('a workspace filter covers the whole subtree, and / filters nothing', async (t) => {
-  const [ref] = await listRecentSessions({ limit: 1 });
-  if (!ref?.workspace) return t.skip('no local sessions with a known workspace');
-
-  // The session lives *under* its parent directory, never equal to it.
-  const parent = path.dirname(ref.workspace);
-  const inParent = await listRecentSessions({ limit: 200, workspace: parent });
-  assert.ok(inParent.some((item) => item.id === ref.id), 'subtree listing must contain the child');
-  for (const item of inParent) assert.ok(item.workspace && isInside(parent, item.workspace));
-
-  const root = await listRecentSessions({ limit: 5, workspace: '/' });
-  const unfiltered = await listRecentSessions({ limit: 5 });
-  assert.deepEqual(root.map((item) => item.id), unfiltered.map((item) => item.id));
-});
-
-test('resolveSession finds a session by id prefix', async (t) => {
-  const [ref] = await listRecentSessions({ limit: 1 });
-  if (!ref) return t.skip('no local sessions');
-  const resolved = await resolveSession(ref.id.slice(0, 8));
-  assert.ok(resolved, 'prefix lookup should resolve');
-  assert.equal(resolved.ref.id, ref.id);
-});
-
 test('distillSession summarizes a real session', async (t) => {
   const [ref] = await listRecentSessions({ limit: 1 });
   if (!ref) return t.skip('no local sessions');
@@ -551,18 +528,6 @@ test('every search hit carries the turn that `turn --event` wants', async (t) =>
     // The handle has to survive the round trip it exists to enable.
     assert.deepEqual(turnDetail(session, match.turn).summary.events, range);
   }
-});
-
-test('the index and the parsing path agree on the turn a hit belongs to', async (t) => {
-  const [ref] = await listRecentSessions({ limit: 1 });
-  if (!ref) return t.skip('no local sessions');
-  const options = { provider: ref.provider, limit: 3, maxPerSession: 3 } as const;
-  const indexed = await searchSessions('.', { ...options, regex: true });
-  const parsed = await searchSessions('.', { ...options, regex: true, useIndex: false });
-  const handles = (hits: Awaited<ReturnType<typeof searchSessions>>) =>
-    hits.map((hit) => [hit.session.id, hit.matches.map((match) => `T${match.turn}·E${match.index}`)]);
-  if (!indexed.length || !parsed.length) return t.skip('no matches to compare');
-  assert.deepEqual(handles(indexed), handles(parsed));
 });
 
 /** One matched event, as the matcher sees it. */

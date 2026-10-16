@@ -96,6 +96,7 @@ whole ladder by reflex:
 | The user is asking | Start with |
 | --- | --- |
 | "what have I been doing / what sessions exist" | `list` |
+| "what projects have the agents worked on / which projects are recent" | `projects` |
 | "where did I discuss X" (a word, path, error string, package name) | `search` |
 | "what happened in that session" (they named or you found one) | `overview` |
 | "find where we talked about X / which turn was that" | `turns` |

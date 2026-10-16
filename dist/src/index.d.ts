@@ -8,6 +8,7 @@ export { eventDetail, eventDetails, parseEventSpec, summarizeTurns, turnDetail, 
 export { analyzableCommand, fileWrites, rawCommand, stripHeredocs, resolveWritePath, type FileWrite, } from './writes.js';
 export { echoFolder, isCallerSession, mandatoryLiteral, planQuery, searchSessions, type Candidate, type QueryPlan, type SearchHit, type SearchMatch, type SearchOptions, } from './search.js';
 export { aggregateWorkspaceSessions, type AggregateOptions } from './aggregator.js';
+export { listProjects, type ProjectSummary, type ProjectOptions, type ProjectPage } from './projects.js';
 export type { ProviderAdapter, SessionCandidate } from './parsers/provider.js';
 export { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
 export { defaultDbPath, openStore, resetStoreCache } from './store/db.js';

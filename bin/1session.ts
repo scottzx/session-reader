@@ -7,6 +7,7 @@ import { buildOverview } from '../src/overview.js';
 import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../src/reader.js';
 import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { listRecentSessions, loadSession } from '../src/resolver.js';
+import { listProjects } from '../src/projects.js';
 import { searchSessions } from '../src/search.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
@@ -16,6 +17,8 @@ import type { DigestFocus, FileGroup, NormalizedSession, TurnKind } from '../src
 const USAGE = `1session — cross-agent session Read Plane
 
   1session list [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--since 24h] [--json]
+  1session projects [--page <n>] [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--json]
+                          从历史工作目录推导项目，按最新会话创建时间倒序（默认 global）
   1session overview <session-id> [--json]              第 1 层：会话概要
   1session turns <session-id> [--json]                 第 2 层：逐轮概要
   1session turn <session-id> <n|a-b|a,b,c> [--event <k|a-b|a,b,c>] [--locator <ref>] [--raw]
@@ -168,6 +171,27 @@ async function main(): Promise<void> {
   await noteRead(command, positional[0]);
 
   switch (command) {
+    case 'projects': {
+      const result = await listProjects({
+        page: flags.page === undefined ? undefined : num(flags.page) ?? NaN,
+        limit: flags.limit === undefined ? undefined : num(flags.limit) ?? NaN,
+        workspace: scopeWorkspace({ scope: 'global', ...flags }),
+        provider: str(flags.provider) as never,
+        useIndex,
+      });
+      print(json, result, [
+        '项目名  最近修改时间（最新会话创建时间）  智能体  会话数  项目路径',
+        ...result.projects.map((project) =>
+          `${project.name}  ${project.updatedAt ?? '?'}  ${project.providers.join(',')}  ` +
+          `${project.sessionCount}  ${project.workspace}`,
+        ),
+        ...(result.projects.length ? [] : ['(no projects found)']),
+        `第 ${result.page} 页 · 每页 ${result.limit} 个 · 共 ${result.total} 个项目` +
+          (result.hasMore ? ` · 下一页：--page ${result.nextPage}` : ''),
+      ].join('\n'));
+      break;
+    }
+
     case 'list': {
       const refs = await listRecentSessions({
         limit: num(flags.limit) ?? 20,

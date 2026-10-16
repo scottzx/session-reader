@@ -7,6 +7,7 @@ export { eventDetail, eventDetails, parseEventSpec, summarizeTurns, turnDetail, 
 export { analyzableCommand, fileWrites, rawCommand, stripHeredocs, resolveWritePath, } from './writes.js';
 export { echoFolder, isCallerSession, mandatoryLiteral, planQuery, searchSessions, } from './search.js';
 export { aggregateWorkspaceSessions } from './aggregator.js';
+export { listProjects } from './projects.js';
 export { canonicalizePath, isInside, slugifyWorkspace } from './util/paths.js';
 export { defaultDbPath, openStore, resetStoreCache } from './store/db.js';
 export { indexSession, refreshSession, } from './store/indexer.js';

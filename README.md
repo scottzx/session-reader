@@ -115,6 +115,7 @@ npm run build && node dist/bin/1session.js <command>
 | 命令 | 说明 |
 | --- | --- |
 | `1session list [--limit n] [--scope <path>\|cwd\|global] [--provider name] [--since 24h] [--json]` | 按最近更新列出各智能体的会话（默认当前 pwd 子树，见 `--scope`） |
+| `1session projects [--page n] [--limit n] [--scope <path>\|cwd\|global] [--provider name] [--json]` | 从历史工作目录推导项目名，按最新会话创建时间倒序分页（默认全部项目） |
 | `1session overview <session-id> [--json]` | **第 1 层**：统计卡片（轮次/文件/命令/提交/产物/上传/后台任务/token）+ 目标、口径修正、状态锚点、全量落盘 |
 | `1session turns <session-id> [--json]` | **第 2 层**：逐轮概要——时间、耗时、事件区间、文件/命令/失败数、用户说了什么、agent 回了什么 |
 | `1session turn <session-id> <n> [--event k\|a-b\|a,b,c] [--json]` | **第 3 层**：默认读取用户与助手的可见正文、附工具目录；支持批量轮次、`--locator`、`--call`、`--artifact`、`--raw` 和游标分页 |
@@ -130,6 +131,26 @@ npm run build && node dist/bin/1session.js <command>
 | `1session skill install\|status\|uninstall [--agent a,b] [--copy] [--force] [--dry-run]` | 把内置 skill 装进五家智能体的 skills 目录（见上） |
 
 全局开关 `--no-index` 绕过索引直读源文件。
+
+### 项目列表与分页
+
+```bash
+1session projects                           # 全部智能体的项目，第 1 页，每页 20 个
+1session projects --page 2 --limit 10        # 第 2 页，每页 10 个项目
+1session projects --scope .. --provider codex --json
+```
+
+项目以归一化后的完整工作目录去重，项目名取目录末级名称；不同路径的同名项目分别保留，
+不同智能体在同一路径下的会话合并。输出项目名、最近修改时间、智能体、会话数和完整路径。
+这里的「最近修改时间」取该项目最新的**会话创建时间**，不取会话文件的修改时间。
+没有创建时间的项目显示 `?` 并排在最后；无法恢复工作目录的会话不计入项目列表。
+历史目录即使已经删除，仍可从会话中列出。时间相同时按完整路径排序。
+
+`projects` 默认跨全部项目，`--scope cwd` 可限定当前目录子树。先聚合、排序，再按项目分页，
+`--page` 从 1 开始，`--limit` 默认 20，两者须为正整数。
+JSON 返回 `{ projects, total, page, limit, hasMore, nextPage? }`；每个项目包含
+`name`、`workspace`、`updatedAt?`、`sessionCount` 和 `providers`。末页省略 `nextPage`，
+超出末页返回空 `projects` 并保留总数。
 
 ### 关键词、ID 与原文读取
 
@@ -310,6 +331,7 @@ T 3 2026-09-11T13:03:29 (283s)  事件 29–45  文件 1 · 命令 7 · 失败 0
 ```ts
 import {
   listRecentSessions,
+  listProjects,
   findSessionsByWorkspace,
   loadSession,
   parseSession,
@@ -324,6 +346,7 @@ import {
 } from '@1agents/session-reader';
 
 const sessions = await findSessionsByWorkspace(process.cwd(), { since: '7d' });
+const projects = await listProjects({ page: 1, limit: 20 });
 const digest = distillSession(await parseSession(sessions[0].id), { focus: 'marketing' });
 const story = await aggregateWorkspaceSessions(process.cwd(), { since: '24h' });
 const hits = await searchSessions('小红书', { workspace: process.cwd(), since: '24h', kinds: ['user'] });

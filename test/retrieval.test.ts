@@ -6,7 +6,8 @@ import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { adapters, listRecentSessions, loadSession } from '../src/resolver.js';
+import { adapters, listRecentSessions, loadSession, resolveSession } from '../src/resolver.js';
+import { listProjects } from '../src/projects.js';
 import { claudeAdapter } from '../src/parsers/claude.js';
 import { codexAdapter } from '../src/parsers/codex.js';
 import { dshAdapter } from '../src/parsers/dsh.js';
@@ -55,6 +56,121 @@ async function fixture(run: (dir: string, add: (adapter: ProviderAdapter, name: 
 const user = (text: string, uuid: string, timestamp = '2026-01-01T00:00:00Z') => ({ type: 'user', uuid, cwd: '/tmp/ws', timestamp, message: { role: 'user', content: [{ type: 'text', text }] } });
 const assistant = (text: string, uuid: string, timestamp = '2026-01-01T00:00:01Z') => ({ type: 'assistant', uuid, timestamp, message: { id: `message-${uuid}`, content: [{ type: 'text', text }] } });
 
+test('projects merge all five providers by path and use creation time rather than modification time', async () => fixture(async (dir, add) => {
+  const workspace = '/tmp/project-list/中文 项目';
+  await add(claudeAdapter, 'claude-project.jsonl', [{ ...user('question', 'u1'), cwd: workspace }]);
+  await add(codexAdapter, 'codex-project.jsonl', [
+    { type: 'session_meta', timestamp: '2026-01-02T00:00:00Z', payload: { cwd: workspace } },
+  ]);
+  await add(antigravityAdapter, 'antigravity-project/transcript.jsonl', [
+    { type: 'GENERIC', created_at: '2026-01-03T00:00:00Z', tool_calls: [{ name: 'run_command', args: { Cwd: workspace } }] },
+  ]);
+  await add(dshAdapter, 'dsh-project/session.v2.jsonl', [
+    { type: 'session', version: 2, cwd: workspace, createdAt: Date.parse('2026-01-04T00:00:00Z') },
+  ]);
+  await add(grokAdapter, 'grok-project/chat_history.jsonl', [{ type: 'user', content: 'question' }]);
+  await fs.writeFile(path.join(dir, 'grok-project/summary.json'), JSON.stringify({
+    info: { cwd: workspace }, created_at: '2026-01-05T08:00:00+08:00', updated_at: '2026-12-31T00:00:00Z',
+  }));
+  await add(claudeAdapter, 'same-name.jsonl', [{ ...user('question', 'u1', '2026-01-06T00:00:00Z'), cwd: '/tmp/other/中文 项目' }]);
+  await add(claudeAdapter, 'tied-time.jsonl', [{ ...user('question', 'u1', '2026-01-06T08:00:00+08:00'), cwd: '/tmp/project-list/tie' }]);
+  await add(claudeAdapter, 'old-project.jsonl', [
+    { ...user('question', 'u1'), cwd: '/tmp/project-list/old' },
+    assistant('recent update to old session', 'a1', '2026-12-31T00:00:00Z'),
+  ]);
+  await add(claudeAdapter, 'undated-project.jsonl', [{ type: 'user', cwd: '/tmp/project-list/undated', message: { content: 'question' } }]);
+  await add(claudeAdapter, 'invalid-date.jsonl', [{ ...user('question', 'u1', 'invalid'), cwd: '/tmp/project-list/undated' }]);
+  await add(claudeAdapter, 'no-project.jsonl', [{ type: 'user', message: { content: 'question' } }]);
+
+  const indexed = await listProjects();
+  const direct = await listProjects({ useIndex: false });
+  assert.deepEqual(indexed, direct);
+  assert.equal(indexed.total, 5);
+  assert.deepEqual(indexed.projects.map((project) => project.workspace), [
+    '/tmp/other/中文 项目', '/tmp/project-list/tie', workspace, '/tmp/project-list/old', '/tmp/project-list/undated',
+  ]);
+  const shared = indexed.projects[2]!;
+  assert.equal(shared.name, '中文 项目');
+  assert.equal(shared.sessionCount, 5);
+  assert.equal(shared.updatedAt, '2026-01-05T00:00:00.000Z');
+  assert.deepEqual(shared.providers, ['antigravity', 'claude', 'codex', 'dsh', 'grok']);
+  assert.equal(indexed.projects.at(-1)!.updatedAt, undefined);
+  const scoped = await listProjects({ workspace: '/tmp/project-list' });
+  assert.equal(scoped.total, 4);
+  const filtered = await listProjects({ workspace, provider: 'codex' });
+  assert.equal(filtered.total, 1);
+  assert.equal(filtered.projects[0]!.sessionCount, 1);
+  assert.equal(filtered.projects[0]!.updatedAt, '2026-01-02T00:00:00.000Z');
+}));
+
+test('projects page after complete discovery, including more than the raw scan budget', async () => fixture(async (_dir, add) => {
+  for (let i = 0; i < 65; i++) {
+    await add(claudeAdapter, `project-${i}.jsonl`, [{
+      ...user('question', 'u1', new Date(Date.UTC(2026, 0, 1 + i)).toISOString()), cwd: `/tmp/projects/project-${i}`,
+    }]);
+  }
+  for (const useIndex of [true, false]) {
+    const first = await listProjects({ limit: 30, useIndex });
+    assert.equal(first.total, 65);
+    assert.equal(first.projects.length, 30);
+    assert.equal(first.projects[0]!.name, 'project-64');
+    assert.equal(first.nextPage, 2);
+    const second = await listProjects({ page: 2, limit: 30, useIndex });
+    const last = await listProjects({ page: 3, limit: 30, useIndex });
+    assert.equal(second.nextPage, 3);
+    assert.equal(last.projects.length, 5);
+    assert.equal(last.hasMore, false);
+    assert.equal(last.nextPage, undefined);
+    assert.equal(new Set([...first.projects, ...second.projects, ...last.projects].map((project) => project.workspace)).size, 65);
+    const pastEnd = await listProjects({ page: 4, limit: 30, useIndex });
+    assert.deepEqual(pastEnd.projects, []);
+    assert.equal(pastEnd.total, 65);
+    assert.equal(pastEnd.hasMore, false);
+  }
+}));
+
+test('projects validate pagination and return an empty page for no workspaces', async () => fixture(async () => {
+  for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(listProjects({ page: value }), /page must be a positive safe integer/);
+    await assert.rejects(listProjects({ limit: value }), /limit must be a positive safe integer/);
+  }
+  assert.deepEqual(await listProjects(), { projects: [], total: 0, page: 1, limit: 20, hasMore: false });
+}));
+
+test('projects CLI defaults to all projects, supports pages and scope, and validates flags', async () => fixture(async (dir) => {
+  const home = path.join(dir, 'home');
+  const local = path.join(home, 'work/local');
+  const sibling = path.join(home, 'work/sibling');
+  await fs.mkdir(local, { recursive: true });
+  const sessions = path.join(home, '.claude/projects/test');
+  await fs.mkdir(sessions, { recursive: true });
+  for (const [name, cwd, timestamp] of [
+    ['local', local, '2026-01-01T00:00:00Z'],
+    ['sibling', sibling, '2026-01-02T00:00:00Z'],
+  ]) {
+    await fs.writeFile(path.join(sessions, `${name}.jsonl`), JSON.stringify({ ...user('question', 'u1', timestamp), cwd }) + '\n');
+  }
+  const args = ['--import', import.meta.resolve('tsx'), path.resolve('bin/1session.ts'), 'projects'];
+  const env = { ...process.env, HOME: home, SESSION_READER_NO_INDEX: '0', SESSION_READER_CALLER_SESSION: '' };
+  const run = (flags: string[]) => promisify(execFile)(process.execPath, [...args, ...flags], { env, cwd: local });
+  const first = JSON.parse((await run(['--limit', '1', '--json'])).stdout);
+  assert.equal(first.total, 2);
+  assert.equal(first.projects[0].name, 'sibling');
+  assert.equal(first.nextPage, 2);
+  const second = JSON.parse((await run(['--limit', '1', '--page', '2', '--json', '--no-index'])).stdout);
+  assert.equal(second.projects[0].name, 'local');
+  assert.equal(second.hasMore, false);
+  const scoped = JSON.parse((await run(['--scope', 'cwd', '--json'])).stdout);
+  assert.equal(scoped.total, 1);
+  assert.equal(scoped.projects[0].name, 'local');
+  const text = (await run(['--limit', '1'])).stdout;
+  assert.match(text, /最近修改时间（最新会话创建时间）/);
+  assert.match(text, /共 2 个项目.*下一页：--page 2/);
+  for (const flags of [['--page', 'bad'], ['--limit', '0'], ['--page']]) {
+    await assert.rejects(run(flags), /must be a positive safe integer/);
+  }
+}));
+
 test('read-only index writes fall back to fresh source data across search, listings and readers', async t => fixture(async (dir, add) => {
   await add(claudeAdapter, 'readonly-session.jsonl', [
     user('readonly question', 'u1'),
@@ -78,6 +194,7 @@ test('read-only index writes fall back to fresh source data across search, listi
     const continuation = { sessionId: id, maxPerSession: 1, cursor: first[0]!.nextCursor };
     assert.deepEqual(await searchSessions('readonly', continuation), await searchSessions('readonly', { ...continuation, ...options }));
     assert.deepEqual(await listRecentSessions(), await listRecentSessions(options));
+    assert.deepEqual(await listProjects(), await listProjects(options));
     assert.deepEqual(await loadSession(id), await loadSession(id, options));
     assert.deepEqual(await readTurnDirectory(id), await readTurnDirectory(id, options));
     const page = await readTurns(id, '1', { maxChars: 5 });
@@ -359,6 +476,70 @@ test('broad regexes bound reported ranges while preserving complete original tex
   assert.equal(hit.matches[0]!.fields![0]!.ranges.length, 20);
   assert.equal(hit.matches[0]!.fields![0]!.hasMoreRanges, true);
   assert.equal((await readEvents('claude:broad-session', [hit.matches[0]!.locator!], { maxChars: 1_000_000 })).items[0]!.content, text);
+}));
+
+test('resolveSession accepts unique prefixes and refuses colliding eight-character prefixes', async () => fixture(async (_dir, add) => {
+  for (const id of ['01a11fb0-1111', '01a11fb0-2222']) {
+    await add(codexAdapter, `${id}.jsonl`, [
+      { type: 'session_meta', timestamp: '2026-01-01T00:00:00Z', payload: { cwd: '/tmp/ws' } },
+    ]);
+  }
+  for (const prefix of ['01a11fb0-1', 'codex:01a11fb0-1', 'codex:01a11fb0-1111']) {
+    const resolved = await resolveSession(prefix);
+    assert.ok(resolved, 'unique prefix lookup should resolve');
+    assert.equal(resolved.ref.id, '01a11fb0-1111');
+    assert.equal(resolved.ref.provider, 'codex');
+  }
+  for (const prefix of ['01a11fb0', 'codex:01a11fb0']) {
+    await assert.rejects(resolveSession(prefix), /ambiguous.*codex:01a11fb0-1111.*codex:01a11fb0-2222/);
+  }
+  assert.equal(await resolveSession('01a11'), undefined, 'prefixes shorter than six characters are refused');
+}));
+
+test('a workspace filter covers the whole subtree, and / filters nothing', async () => fixture(async (_dir, add) => {
+  const parent = '/tmp/workspace-scope';
+  for (const [name, workspace] of [
+    ['parent', parent], ['child', `${parent}/child`], ['grandchild', `${parent}/child/grandchild`],
+    ['sibling', `${parent}-other`], ['unknown', undefined],
+  ]) {
+    await add(codexAdapter, `${name}.jsonl`, [
+      { type: 'session_meta', timestamp: '2026-01-01T00:00:00Z', payload: { cwd: workspace } },
+    ]);
+  }
+  for (const useIndex of [true, false]) {
+    const options = { limit: 20, scan: Infinity, useIndex };
+    const inParent = await listRecentSessions({ ...options, workspace: parent });
+    assert.deepEqual(inParent.map((ref) => ref.id).sort(), ['child', 'grandchild', 'parent']);
+    const inChild = await listRecentSessions({ ...options, workspace: `${parent}/child` });
+    assert.deepEqual(inChild.map((ref) => ref.id).sort(), ['child', 'grandchild']);
+    const root = await listRecentSessions({ ...options, workspace: '/' });
+    const unfiltered = await listRecentSessions(options);
+    assert.deepEqual(root, unfiltered);
+    assert.equal(root.length, 5, 'global scope includes sessions without a workspace');
+  }
+}));
+
+test('the index and the parsing path agree on search order and turn handles', async () => fixture(async (_dir, add) => {
+  for (const [name, day] of [['parity-b', 2], ['parity-z', 3], ['parity-a', 2]] as const) {
+    const at = (second: number) => `2026-01-0${day}T00:00:0${second}Z`;
+    await add(claudeAdapter, `${name}.jsonl`, [
+      user('needle first question', 'u1', at(0)),
+      assistant('needle first answer', 'a1', at(1)),
+      user('needle second question', 'u2', at(2)),
+      assistant('needle second answer', 'a2', at(3)),
+    ]);
+  }
+  for (const sort of ['relevance', 'time'] as const) {
+    const options = { provider: 'claude', limit: 3, maxPerSession: 3, regex: true, sort } as const;
+    const indexed = await searchSessions('.', options);
+    const parsed = await searchSessions('.', { ...options, useIndex: false });
+    assert.deepEqual(indexed, parsed);
+    assert.deepEqual(indexed.map((hit) => hit.session.id), ['parity-z', 'parity-a', 'parity-b']);
+    for (const hit of indexed) {
+      assert.equal(hit.totalMatches, 5);
+      assert.deepEqual(hit.matches.map((match) => `T${match.turn}·E${match.index}`), ['T0·E-1', 'T2·E3', 'T2·E2']);
+    }
+  }
 }));
 
 test('short IDs refuse collisions across providers and within an index', async () => fixture(async (_dir, add) => {

@@ -3,7 +3,7 @@
 Read this when SKILL.md doesn't cover the flag you need.
 
 - [Global flags](#global-flags)
-- [Discovery: list, search, workspace](#discovery)
+- [Discovery: list, projects, search, workspace](#discovery)
 - [One session: overview, turns, turn, digest](#one-session)
 - [Ledgers: commands, files, errors, jobs](#ledgers)
 - [Index and graph](#index-and-graph)
@@ -44,6 +44,27 @@ Most recently updated sessions first. Columns: provider, 8-char id, updated-at,
 workspace basename, title.
 
 `--since` accepts `24h`, `7d`, `30d` and similar.
+
+### `projects`
+
+```
+1session projects [--page n] [--limit n] [--scope <path>|cwd|global] [--global]
+                  [--provider claude|codex|antigravity|grok|dsh] [--json]
+```
+
+Defaults to all projects, page 1, 20 projects per page. Groups sessions from all
+providers by canonical workspace path; the final directory name is the project
+name. Same-named directories at different paths remain separate projects.
+Columns: name, last-modified time, providers, session count, full workspace path.
+Last-modified time means the newest **session creation time**, never file mtime
+or the last transcript event. Undated projects sort last; ties sort by path.
+Sessions without a workspace are omitted; historical paths need not still exist.
+
+Grouping and sorting happen before pagination. `--page` and `--limit` must be
+positive integers. JSON returns `{ projects, total, page, limit, hasMore, nextPage? }`;
+each project has `name`, `workspace`, `updatedAt?`, `sessionCount`, and `providers`.
+The final page omits `nextPage`; pages past the end return an empty `projects`
+array with the original total. Use `--scope cwd` to narrow to the current subtree.
 
 ### `search`
 
