@@ -8,7 +8,7 @@ export function defaultDbPath() {
     const override = process.env.SESSION_READER_DB;
     if (override)
         return override;
-    return path.join(os.homedir(), '.1agents', 'session-reader', 'index.db');
+    return path.join(os.homedir(), '.1agents', 'session-reader', `index-v${SCHEMA_VERSION}.db`);
 }
 let cached;
 let cachedPath;
@@ -41,7 +41,7 @@ export async function tryIndex(read) {
     }
 }
 /**
- * Opens (and migrates) the index. The handle is cached per path so a single
+ * Opens the version-isolated index without destructive migration. The handle is cached per path so a single
  * CLI run never opens the file twice.
  */
 export async function openStore(dbPath = defaultDbPath()) {
@@ -50,14 +50,22 @@ export async function openStore(dbPath = defaultDbPath()) {
     const { DatabaseSync: Sqlite } = await importSqlite();
     if (dbPath !== ':memory:')
         fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    let db = new Sqlite(dbPath);
+    // Check existing databases read-only before any journal mode or DDL write.
+    if (dbPath !== ':memory:' && fs.existsSync(dbPath) && fs.statSync(dbPath).size > 0) {
+        const probe = new Sqlite(dbPath, { readOnly: true });
+        try {
+            assertStoreSchema(probe, dbPath);
+        }
+        finally {
+            probe.close();
+        }
+    }
+    const db = new Sqlite(dbPath);
     try {
+        assertStoreSchema(db, dbPath);
         db.exec('PRAGMA journal_mode = WAL');
         db.exec('PRAGMA synchronous = NORMAL');
         db.exec('PRAGMA busy_timeout = 5000');
-        if (schemaVersionOf(db) !== SCHEMA_VERSION) {
-            db = rebuild(db, Sqlite, dbPath);
-        }
         db.exec(DDL);
         db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
         cached = db;
@@ -68,7 +76,7 @@ export async function openStore(dbPath = defaultDbPath()) {
         try {
             db.close();
         }
-        catch { /* rebuild may have already closed it */ }
+        catch { /* preserve the opening error */ }
         throw error;
     }
 }
@@ -81,24 +89,13 @@ function schemaVersionOf(db) {
         return undefined; // no meta table yet — a fresh file
     }
 }
-/**
- * A DDL change invalidates every derived row, and L0 can rebuild all of it, so
- * starting from an empty file beats writing migration code for a cache.
- */
-function rebuild(db, Sqlite, dbPath) {
-    const hadTables = db.prepare("SELECT count(*) AS c FROM sqlite_master WHERE type = 'table'").get().c > 0;
-    if (!hadTables)
-        return db;
-    db.close();
-    if (dbPath !== ':memory:') {
-        for (const suffix of ['', '-wal', '-shm'])
-            fs.rmSync(`${dbPath}${suffix}`, { force: true });
+/** Unknown/newer/older populated stores belong to their original reader. Never erase them. */
+export function assertStoreSchema(db, dbPath) {
+    const tables = db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type = 'table'").get();
+    const version = schemaVersionOf(db);
+    if (tables.n > 0 && version !== SCHEMA_VERSION) {
+        throw Object.assign(new Error(`Index schema mismatch at ${dbPath}: expected ${SCHEMA_VERSION}, found ${version ?? 'unknown'}. Refusing to modify it; use a new SESSION_READER_DB path.`), { code: 'INDEX_SCHEMA_MISMATCH' });
     }
-    const fresh = new Sqlite(dbPath);
-    fresh.exec('PRAGMA journal_mode = WAL');
-    fresh.exec('PRAGMA synchronous = NORMAL');
-    fresh.exec('PRAGMA busy_timeout = 5000');
-    return fresh;
 }
 /** Test hook — forgets the cached handle so a new path can be opened. */
 export function resetStoreCache() {

@@ -33,6 +33,10 @@ export interface SearchOptions extends ListOptions {
 }
 
 export interface SearchMatch {
+  /** Semantic cosine similarity, not a confidence or correctness probability. */
+  similarity?: number;
+  /** Original event text range in UTF-16 offsets; use locator to read the full event. */
+  chunkRange?: [number, number];
   index: number;
   /**
    * The turn this event belongs to — the other half of the drill-down handle,
@@ -52,6 +56,8 @@ export interface SearchMatch {
 }
 
 export interface SearchHit {
+  /** Best semantic similarity in this session, when semantic retrieval was requested. */
+  score?: number;
   session: SessionRef;
   matches: SearchMatch[];
   totalMatches: number;

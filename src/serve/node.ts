@@ -56,7 +56,7 @@ export async function buildManifest(baseUrl: string): Promise<NodeManifest> {
     type: identity.type,
     tailscale_name: identity.dnsName ?? process.env.DREAMMATE_TAILSCALE_NAME?.trim() ?? null,
     online: true,
-    metadata: { protocol_version: PROTOCOL_VERSION, identity_source: identity.source },
+    metadata: { protocol_version: PROTOCOL_VERSION, identity_source: identity.source, session_search_modes: ['keyword', 'semantic'], semantic_coverage: 'structural-index-snapshot' },
     services: [
       {
         id: 'session-registry',

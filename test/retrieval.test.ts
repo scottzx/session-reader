@@ -371,7 +371,11 @@ test('read-only SQLite initialization falls back and closes failed store handles
     assert.equal((await searchSessions('question')).length, 1);
     assert.equal((await listRecentSessions()).length, 1);
     assert.equal((await readTurns('claude:init-session', '1')).items[0]!.content, 'question');
-    assert.equal(close.mock.callCount(), 3);
+    // Each attempt closes its read-only schema probe AND the failed writable handle.
+    // Keep the protection check, and verify every connection is closed exactly once.
+    assert.equal(close.mock.callCount(), 6);
+    assert.equal(new Set(close.mock.calls.map(call => call.this)).size, 6);
+    assert.equal(readonly.mock.calls.filter(call => call.arguments[0] === 'PRAGMA journal_mode = WAL').length, 3);
   } finally {
     readonly.mock.restore(); close.mock.restore(); warnings.mock.restore();
   }

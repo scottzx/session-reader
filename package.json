@@ -66,7 +66,8 @@
     "README.md",
     "LICENSE",
     "screenshots.json",
-    "docs/screenshots"
+    "docs/screenshots",
+    "docs/semantic-index.md"
   ],
   "publishConfig": {
     "access": "public",
@@ -75,9 +76,10 @@
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node scripts/bundle-client.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test test/session-reader.test.ts test/dsh-adapter.test.ts test/dsh-open.test.ts test/web.test.ts test/retrieval.test.ts test/dsh-format.test.ts",
+    "test": "node --import tsx --test test/session-reader.test.ts test/dsh-adapter.test.ts test/dsh-open.test.ts test/web.test.ts test/retrieval.test.ts test/dsh-format.test.ts test/semantic.test.ts test/semantic-entrypoints.test.ts",
     "prepack": "npm run build",
-    "1session": "tsx bin/1session.ts"
+    "1session": "tsx bin/1session.ts",
+    "test:package": "npm run build && node scripts/check-packed-install.mjs"
   },
   "engines": {
     "node": ">=22.15"
@@ -89,6 +91,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
+    "@1agents/artifact-index": "^0.1.0",
     "@1agents/chat-ui": "^0.1.0",
     "@1agents/dreammate-network": "^0.3.0",
     "@1agents/dreammate-node": "^0.4.0",

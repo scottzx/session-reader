@@ -72,3 +72,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Dependency and semantic changes
+
+Preserve raw transcripts and unknown/newer SQLite schemas. Keep model profiles separate. Update docs/semantic-index.md and the 1session skill when changing the retrieval contract. Before release, run typecheck, the complete test suite, and `npm run test:package`; a worktree symlink passing tests is not packaged-install evidence. Never upgrade the live DSH profile or publish npm packages merely to validate a change.

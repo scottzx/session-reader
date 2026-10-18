@@ -1,4 +1,4 @@
-import { resolveSession, searchSessions, buildOverview, readTurnDirectory, readTurns, readOriginalRecords, readEvents, readCall, readArtifact, } from '../index.js';
+import { resolveSession, retrieveSessions, buildOverview, readTurnDirectory, readTurns, readOriginalRecords, readEvents, readCall, readArtifact, } from '../index.js';
 import { handleSessionApi } from '../web/api.js';
 import { openSessionInDsh, continuationAvailability } from './open.js';
 export const name = 'session-reader';
@@ -14,7 +14,9 @@ export function apply(ctx) {
             parameters: {
                 type: 'object',
                 properties: {
-                    query: { type: 'string', description: 'Keywords, file paths, or error messages to search for' },
+                    query: { type: 'string', description: 'Literal query, or a natural-language question in semantic mode' },
+                    mode: { type: 'string', enum: ['keyword', 'semantic'], description: 'Default keyword. Semantic requires a prebuilt local dialogue index; returns coverage metadata.' },
+                    model: { type: 'string', enum: ['qwen3', 'embeddinggemma2'], description: 'Semantic vector space, default qwen3' },
                     workspace: { type: 'string', description: 'Filter by workspace path (optional, defaults to current session workspace)' },
                     scope: { type: 'string', description: 'Search scope: cwd (default, current session directory), global (all workspaces), or specific path' },
                     since: { type: 'string', description: 'Time filter, e.g. 24h, 7d, 30d' },
@@ -30,7 +32,7 @@ export function apply(ctx) {
                 required: ['query'],
             },
             output: {
-                schema: { type: 'array' },
+                schema: { oneOf: [{ type: 'array' }, { type: 'object' }] },
                 render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
             },
             async execute(args, exec) {
@@ -49,14 +51,15 @@ export function apply(ctx) {
                     // Default to current session PWD
                     targetWorkspace = currentCwd;
                 }
-                const hits = await searchSessions(args.query, {
+                const retrieved = await retrieveSessions(args.query, {
+                    mode: args.mode, model: args.model, selfSessionId: exec?.agent?.session?.header?.id,
                     workspace: targetWorkspace,
                     since: args.since,
                     kinds: args.kind ? [args.kind] : undefined,
                     limit: args.limit,
                     area: args.area, sessionId: args.sessionId, terms: args.terms, operator: args.operator, sort: args.sort, cursor: args.cursor,
                 });
-                return hits;
+                return retrieved.retrieval.mode === 'semantic' ? retrieved : retrieved.hits;
             },
         }));
         // session_overview

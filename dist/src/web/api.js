@@ -1,6 +1,6 @@
 import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact } from '../reader.js';
 import { callsIn } from '../calls.js';
-import { buildOverview, displayPath, fileLedger, listRecentSessions, loadSession, searchSessions, summarizeTurns, } from '../index.js';
+import { buildOverview, displayPath, fileLedger, listRecentSessions, loadSession, retrieveSessions, summarizeTurns, } from '../index.js';
 export function resolveListWorkspace(scope, workspace, fallbackCwd) {
     if (scope === 'global')
         return undefined;
@@ -106,12 +106,23 @@ export async function handleSessionApi(pathname, url, res, options) {
         const provider = url.searchParams.get('provider') ?? undefined;
         const limit = url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : 20;
         const workspace = resolveListWorkspace(scope, url.searchParams.get('workspace'), options.fallbackCwd);
-        const hits = await searchSessions(query, { workspace, since, provider, limit,
-            area: url.searchParams.get('area') || undefined, sessionId: url.searchParams.get('session') ?? undefined,
-            terms: url.searchParams.getAll('term').length ? url.searchParams.getAll('term') : undefined,
-            operator: url.searchParams.get('operator') || undefined, sort: url.searchParams.get('sort') || undefined,
-            cursor: url.searchParams.get('cursor') ?? undefined, });
-        sendJson(res, 200, { hits });
+        try {
+            const retrieved = await retrieveSessions(query, { workspace, since, provider, limit,
+                mode: url.searchParams.get('mode') || undefined, model: url.searchParams.get('model') || undefined,
+                area: url.searchParams.get('area') || undefined, sessionId: url.searchParams.get('session') ?? undefined,
+                terms: url.searchParams.getAll('term').length ? url.searchParams.getAll('term') : undefined,
+                operator: url.searchParams.get('operator') || undefined, sort: url.searchParams.get('sort') || undefined,
+                cursor: url.searchParams.get('cursor') ?? undefined, });
+            sendJson(res, 200, retrieved.retrieval.mode === 'semantic' ? retrieved : { hits: retrieved.hits });
+        }
+        catch (error) {
+            const code = error.code;
+            if (!code?.startsWith('SEMANTIC_') && code !== 'EMBEDDING_UNAVAILABLE')
+                throw error;
+            sendJson(res, code === 'SEMANTIC_INVALID_QUERY' ? 400 : 503, {
+                error: error instanceof Error ? error.message : String(error), code,
+            });
+        }
         return true;
     }
     const matchDirectory = pathname.match(/^\/session\/([^/]+)\/directory$/);

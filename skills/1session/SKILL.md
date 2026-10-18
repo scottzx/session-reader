@@ -69,7 +69,7 @@ each call after that sub-second. A slow first call is that build, not a hang.
 ## Read-only environments
 
 1session never writes to history files. Its default cache at
-`~/.1agents/session-reader/index.db` needs write access, including its SQLite
+`~/.1agents/session-reader/index-v3.db` needs write access, including its SQLite
 WAL/SHM files. When the index cannot be opened or written because of permissions
 or a read-only filesystem, search, listing and session reads automatically fall
 back to the original files. A warning goes to stderr; JSON on stdout stays valid.
@@ -271,3 +271,29 @@ timeline is usually the answer the user wanted.
 `references/cli.md` holds the full flag surface (every command, every option) —
 read it when a question needs something not covered above, such as filtering by
 provider, regex search, tuning context lines, or forcing an index rebuild.
+
+
+## Opt-in semantic search (unreleased branch)
+
+Probe `1session help` first: the older published CLI does not yet expose these flags.
+Default keyword search remains unchanged. A natural-language question may use:
+
+```sh
+1session index --all --scope /absolute/project
+1session index build --semantic --scope /absolute/project --model qwen3 --json
+1session index status --semantic --scope /absolute/project --json
+1session search 'why was this plugin split out' --scope /absolute/project --mode semantic --json
+```
+
+Only explicitly build on user-approved local sources. Search never builds automatically.
+Check `retrieval.partial`, `pendingEvents`, `skippedEvents` and `rawSourceDiscovery:false`:
+coverage is the structural-index snapshot, NOT all raw history or all devices.
+Semantic JSON is `{hits,retrieval}`; keyword JSON retains its old shape.
+Both CLI and DSH `session_search` accept `mode: keyword|semantic` and `model: qwen3|embeddinggemma2`.
+Qwen uses the existing document_search profile; Gemma document indexing needs the updated shared client.
+Errors are explicit, never silently mix models. Only dialogue is indexed; no tool/thinking text.
+The first implementation limits chunks and questions to 320 UTF-8 bytes (not tokens).
+Read full original evidence with `turn <provider:id> --locator <exact-locator>` after finding a candidate.
+Similarity is not correctness or proof of implementation; check later corrections and timestamps.
+Raw transcripts are never changed. Separate semantic-v1.db stores vectors; index-v3.db is structural.
+Do not point old CLI versions at the new DB or delete unknown-schema stores to make a query pass.

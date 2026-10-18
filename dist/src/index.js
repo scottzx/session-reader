@@ -23,3 +23,5 @@ export { convertSessionToDshEvents } from './dsh/adapter.js';
 export { apply, inject, name } from './dsh/index.js';
 export { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact, contentPage } from './reader.js';
 export { callsIn, toolResults } from './calls.js';
+export { retrieveSessions } from './retrieval.js';
+export { buildSemanticIndex, forgetSemanticSession, semanticStatus, searchSemanticSessions, semanticDbPath } from './semantic/index.js';

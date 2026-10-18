@@ -10,7 +10,7 @@ import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall
 import http from 'node:http';
 import { listRecentSessions, loadSession } from '../resolver.js';
 import { buildOverview } from '../overview.js';
-import { searchSessions } from '../search.js';
+import { retrieveSessions } from '../retrieval.js';
 import { canonicalizePath } from '../util/paths.js';
 import { buildManifest, nodeIdentity, sessionUri } from './node.js';
 import { DEFAULT_PORTS } from '@1agents/dreammate-network';
@@ -113,7 +113,8 @@ async function route(ctx) {
         const query = q(ctx, 'q') ?? q(ctx, 'query');
         if (!query)
             return { status: 400, body: { error: 'missing ?q=' } };
-        const hits = await searchSessions(query, {
+        const retrieved = await retrieveSessions(query, {
+            mode: q(ctx, 'mode'), model: q(ctx, 'model'), selfSessionId: ctx.caller, includeSelf: q(ctx, 'include-self') === 'true',
             workspace: scopeOf(ctx),
             since: q(ctx, 'since'),
             limit: qn(ctx, 'limit'),
@@ -128,10 +129,12 @@ async function route(ctx) {
             operator: q(ctx, 'operator'), sort: q(ctx, 'sort'), cursor: q(ctx, 'cursor'),
             useIndex: true,
         });
+        const hits = retrieved.hits;
         return {
             status: 200,
             body: {
                 query,
+                ...(retrieved.retrieval.mode === 'semantic' ? { retrieval: retrieved.retrieval } : {}),
                 total: hits.reduce((sum, hit) => sum + hit.totalMatches, 0),
                 hits: hits.map((hit) => ({
                     ...hit,
@@ -183,7 +186,9 @@ export function createServer(options = {}) {
             catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
                 // A bad session id reads as "not found", not as a server fault.
-                json(res, /not found|missing|no session/i.test(message) ? 404 : 500, { error: message });
+                const code = error.code;
+                const status = code === 'SEMANTIC_INVALID_QUERY' ? 400 : code?.startsWith('SEMANTIC_') || code === 'EMBEDDING_UNAVAILABLE' ? 503 : /not found|missing|no session/i.test(message) ? 404 : 500;
+                json(res, status, { error: message, ...(code ? { code } : {}) });
             }
         })();
     });

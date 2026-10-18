@@ -7,7 +7,7 @@ import {
   fileLedger,
   listRecentSessions,
   loadSession,
-  searchSessions,
+  retrieveSessions,
   summarizeTurns,
 } from '../index.js';
 import type { AgentProvider, NormalizedSession } from '../types.js';
@@ -148,13 +148,22 @@ export async function handleSessionApi(
       url.searchParams.get('workspace'),
       options.fallbackCwd,
     );
-    const hits = await searchSessions(query, { workspace, since, provider, limit,
-      area: url.searchParams.get('area') as never || undefined, sessionId: url.searchParams.get('session') ?? undefined,
-      terms: url.searchParams.getAll('term').length ? url.searchParams.getAll('term') : undefined,
-      operator: url.searchParams.get('operator') as never || undefined, sort: url.searchParams.get('sort') as never || undefined,
-      cursor: url.searchParams.get('cursor') ?? undefined,
-    });
-    sendJson(res, 200, { hits });
+    try {
+      const retrieved = await retrieveSessions(query, { workspace, since, provider, limit,
+        mode: url.searchParams.get('mode') as never || undefined, model: url.searchParams.get('model') as never || undefined,
+        area: url.searchParams.get('area') as never || undefined, sessionId: url.searchParams.get('session') ?? undefined,
+        terms: url.searchParams.getAll('term').length ? url.searchParams.getAll('term') : undefined,
+        operator: url.searchParams.get('operator') as never || undefined, sort: url.searchParams.get('sort') as never || undefined,
+        cursor: url.searchParams.get('cursor') ?? undefined,
+      });
+      sendJson(res, 200, retrieved.retrieval.mode === 'semantic' ? retrieved : { hits: retrieved.hits });
+    } catch (error: unknown) {
+      const code = (error as { code?: string }).code;
+      if (!code?.startsWith('SEMANTIC_') && code !== 'EMBEDDING_UNAVAILABLE') throw error;
+      sendJson(res, code === 'SEMANTIC_INVALID_QUERY' ? 400 : 503, {
+        error: error instanceof Error ? error.message : String(error), code,
+      });
+    }
     return true;
   }
 

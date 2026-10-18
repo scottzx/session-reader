@@ -32,3 +32,6 @@ jobs:
 
       - name: Inspect publishable tarball
         run: npm pack --dry-run
+
+      - name: Clean consumer install of packed artifact
+        run: npm run test:package

@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   resolveSession,
-  searchSessions,
+  retrieveSessions,
   buildOverview,
   readTurnDirectory,
   readTurns,
@@ -28,7 +28,9 @@ export function apply(ctx: any) {
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: 'Keywords, file paths, or error messages to search for' },
+          query: { type: 'string', description: 'Literal query, or a natural-language question in semantic mode' },
+          mode: { type: 'string', enum: ['keyword', 'semantic'], description: 'Default keyword. Semantic requires a prebuilt local dialogue index; returns coverage metadata.' },
+          model: { type: 'string', enum: ['qwen3', 'embeddinggemma2'], description: 'Semantic vector space, default qwen3' },
           workspace: { type: 'string', description: 'Filter by workspace path (optional, defaults to current session workspace)' },
           scope: { type: 'string', description: 'Search scope: cwd (default, current session directory), global (all workspaces), or specific path' },
           since: { type: 'string', description: 'Time filter, e.g. 24h, 7d, 30d' },
@@ -44,7 +46,7 @@ export function apply(ctx: any) {
         required: ['query'],
       },
       output: {
-        schema: { type: 'array' },
+        schema: { oneOf: [{ type: 'array' }, { type: 'object' }] },
         render: (_args: any, value: any) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
       },
       async execute(args: any, exec?: any) {
@@ -61,14 +63,15 @@ export function apply(ctx: any) {
           targetWorkspace = currentCwd;
         }
 
-        const hits = await searchSessions(args.query, {
+        const retrieved = await retrieveSessions(args.query, {
+          mode: args.mode, model: args.model, selfSessionId: exec?.agent?.session?.header?.id,
           workspace: targetWorkspace,
           since: args.since,
           kinds: args.kind ? [args.kind] : undefined,
           limit: args.limit,
           area: args.area, sessionId: args.sessionId, terms: args.terms, operator: args.operator, sort: args.sort, cursor: args.cursor,
         });
-        return hits;
+        return retrieved.retrieval.mode === 'semantic' ? retrieved : retrieved.hits;
       },
     }));
 

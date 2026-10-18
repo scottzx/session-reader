@@ -34,6 +34,9 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      - name: Validate packed candidate before publishing
+        run: npm run test:package
+
       - name: Bump version and tag
         id: bump
         run: |

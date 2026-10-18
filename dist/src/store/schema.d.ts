@@ -6,7 +6,7 @@
  * actually touched. Bump the matching constant in the same commit that changes
  * the behaviour — never derive them from a git hash, `dist` ships without git.
  */
-/** DDL layout. A bump drops and rebuilds the whole database. */
+/** DDL layout. A bump selects a new versioned database path; old files are preserved. */
 export declare const SCHEMA_VERSION = 3;
 /** L1 semantics — anything in `parsers/` that changes normalized events. */
 export declare const PARSER_VERSION = 6;

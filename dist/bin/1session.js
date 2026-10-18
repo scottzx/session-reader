@@ -8,7 +8,7 @@ import { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall
 import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '../src/ledger.js';
 import { listRecentSessions, loadSession } from '../src/resolver.js';
 import { listProjects, listProjectWeeks } from '../src/projects.js';
-import { searchSessions } from '../src/search.js';
+import { retrieveSessions } from '../src/retrieval.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
 const USAGE = `1session — cross-agent session Read Plane
@@ -29,6 +29,7 @@ const USAGE = `1session — cross-agent session Read Plane
   1session digest <session-id> [--focus marketing|review|full] [--json]
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session index [<session-id>] [--all] [--scope <path>|cwd|global] [--force] [--since 30d]  建立/刷新索引
+  1session index build|status|forget --semantic [--model qwen3|embeddinggemma2] [--session <id>] [--global] [--json]
   1session graph <session-id> [--json]                 会话之间的引用关系
   1session serve [--port 7777] [--host 127.0.0.1] [--token <t>] [--no-report]
                           起 HTTP Service，把本机会话接入 DreamMate Network
@@ -41,12 +42,12 @@ const USAGE = `1session — cross-agent session Read Plane
                           [--regex] [--case] [--context n] [--max-hits n]
                           [--area dialogue|tools|artifacts|all] [--session <id>]
                           [--terms <JSON array>] [--operator and|or] [--sort relevance|time] [--cursor <cursor>]
-                          [--include-self] [--json]
+                          [--include-self] [--mode keyword|semantic] [--model qwen3|embeddinggemma2] [--json]
 
 search 命中附带稳定 locator；元数据与产物命中不属于某一轮。--raw 按需读取原始记录。
 默认折叠本次检索自身在活跃会话里留下的回声，--include-self 展开。
 
-全局：--no-index 绕过索引直读源文件。索引位于 ~/.1agents/session-reader/index.db
+全局：--no-index 绕过索引直读源文件。索引位于 ~/.1agents/session-reader/index-v3.db（旧 index.db 不自动修改）
      索引不可写时，搜索、列表和会话读取自动直读源文件；提示输出到 stderr。
      list / search / index --all 默认只看当前 pwd 目录（含子目录）下的会话。
      --scope 取当前目录的相对路径或绝对路径，按子树匹配：--scope .. 含同级项目，
@@ -58,7 +59,7 @@ Providers: antigravity (~/.gemini/antigravity/brain), claude (~/.claude/projects
 /** Flags that never take a value, so they cannot swallow a positional. */
 const BOOLEAN_FLAGS = new Set([
     'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index', 'global',
-    'copy', 'dry-run', 'no-report', 'include-self', 'open', 'weekly',
+    'copy', 'dry-run', 'no-report', 'include-self', 'open', 'weekly', 'semantic',
 ]);
 function parseArgs(argv) {
     const [command = 'help', ...rest] = argv;
@@ -156,8 +157,12 @@ async function noteRead(verb, target) {
 async function main() {
     const { command, positional, flags } = parseArgs(process.argv.slice(2));
     const json = flags.json === true;
+    for (const key of ['mode', 'model'])
+        if (flags[key] !== undefined && !str(flags[key]))
+            throw new Error(`--${key} requires a value`);
     useIndex = flags['no-index'] !== true;
-    await noteRead(command, positional[0]);
+    if (!(command === 'index' && flags.semantic === true) && !(command === 'search' && flags.mode === 'semantic'))
+        await noteRead(command, positional[0]);
     switch (command) {
         case 'projects': {
             for (const name of ['project-map', 'timezone']) {
@@ -360,7 +365,8 @@ async function main() {
         case 'search': {
             const query = positional.join(' ');
             const includeSelf = flags['include-self'] === true;
-            const found = await searchSessions(query, {
+            const retrieved = await retrieveSessions(query, {
+                mode: str(flags.mode), model: str(flags.model), includeSelf,
                 workspace: scopeWorkspace(flags),
                 since: str(flags.since),
                 limit: num(flags.limit),
@@ -378,6 +384,7 @@ async function main() {
                 sort: str(flags.sort),
                 cursor: str(flags.cursor),
             });
+            const found = retrieved.hits;
             // The searcher's own live transcript is noise by default: the query is
             // in it because this very command put it there.
             const hits = includeSelf ? found : found.filter((hit) => !hit.self);
@@ -388,9 +395,13 @@ async function main() {
                 ? `（已折叠 ${foldedMatches} 处本次检索自身留下的回声` +
                     `${foldedSessions ? `，涉及 ${foldedSessions} 个会话` : ''}；--include-self 展开）`
                 : undefined;
-            print(json, hits, hits.length
+            const semanticNote = retrieved.retrieval.mode === 'semantic'
+                ? [`语义检索 · ${retrieved.retrieval.model} · ${retrieved.retrieval.indexedChunks} 已索引片段 · ${retrieved.retrieval.pendingEvents} 待索引事件 · partial=${retrieved.retrieval.partial} · 范围：结构化索引快照（未扫描源目录）；相似度不代表事实已成立`]
+                : [];
+            print(json, retrieved.retrieval.mode === 'semantic' ? { ...retrieved, hits } : hits, hits.length
                 ? [
                     `${total} 处命中，分布在 ${hits.length} 个会话`,
+                    ...semanticNote,
                     ...(foldNote ? [foldNote] : []),
                     ...hits.flatMap((hit) => [
                         '',
@@ -399,7 +410,7 @@ async function main() {
                         `    ${oneLine(hit.session.title, 80)}`,
                         ...(hit.groups ?? [{ turn: 0, matches: hit.matches }]).flatMap((group) => [
                             `  ${group.turn ? `T${group.turn}` : '会话 / 产物'}`,
-                            ...group.matches.map((match) => `    ${match.index >= 0 ? `E${match.index}` : ''} ${match.kind}${match.toolName ? `(${match.toolName})` : ''} [${match.fields?.map((field) => field.field).join(', ')}] ${match.excerpt}`),
+                            ...group.matches.map((match) => `    ${match.index >= 0 ? `E${match.index}` : ''} ${match.kind}${match.toolName ? `(${match.toolName})` : ''} [${match.similarity !== undefined ? `semantic ${match.similarity.toFixed(4)}` : match.fields?.map((field) => field.field).join(', ') ?? ''}] ${match.excerpt}`),
                             ...(group.matches[0] ? (() => {
                                 const match = group.matches[0];
                                 const id = `${hit.session.provider}:${hit.session.id}`;
@@ -414,10 +425,34 @@ async function main() {
                             : []),
                     ]),
                 ].join('\n')
-                : [`无命中：${query}`, ...(foldNote ? [foldNote] : [])].join('\n'));
+                : [`无命中：${query}`, ...semanticNote, ...(foldNote ? [foldNote] : [])].join('\n'));
             break;
         }
         case 'index': {
+            if (flags.semantic === true) {
+                if (!useIndex)
+                    throw new Error('--semantic is incompatible with --no-index');
+                const { buildSemanticIndex, forgetSemanticSession, semanticStatus } = await import('../src/semantic/index.js');
+                const action = positional[0] ?? 'status';
+                for (const key of ['limit', 'scan', 'force', 'all'])
+                    if (flags[key] !== undefined)
+                        throw new Error(`--${key} is not supported by semantic indexing; select --session or --scope instead`);
+                if (action === 'forget') {
+                    const id = str(flags.session);
+                    if (!id)
+                        throw new Error('index forget --semantic requires --session <complete provider:session-id>');
+                    const result = await forgetSemanticSession(id);
+                    print(json, result, JSON.stringify(result, null, 2));
+                    break;
+                }
+                if (action !== 'build' && action !== 'status')
+                    throw new Error('semantic index action must be build, status or forget');
+                const options = { workspace: scopeWorkspace(flags), provider: str(flags.provider),
+                    since: str(flags.since), sessionId: str(flags.session), model: str(flags.model) };
+                const result = action === 'build' ? await buildSemanticIndex(options) : await semanticStatus(options);
+                print(json, result, JSON.stringify(result, null, 2));
+                break;
+            }
             const { openStore } = await import('../src/store/db.js');
             const { indexSession } = await import('../src/store/indexer.js');
             const { deriveEdges } = await import('../src/store/edges.js');

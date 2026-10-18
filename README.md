@@ -499,7 +499,7 @@ overview 的「末态」恰恰是最易腐的一段：
 
 ## 索引：把事实存下来，而不是每次重推
 
-`~/.1agents/session-reader/index.db`（SQLite，`SESSION_READER_DB` 可改）。任何命令碰到一个会话都会顺手索引它；`1session index --all` 做全库回填。
+`~/.1agents/session-reader/index-v3.db`（SQLite，`SESSION_READER_DB` 可改）。任何命令碰到一个会话都会顺手索引它；`1session index --all` 做全库回填。
 
 索引因沙盒权限或只读文件系统无法打开、创建或写入时，搜索、列表和会话读取会自动降级为直接读取原始文件，并向 stderr 输出提示；stdout 的 JSON 格式不变。降级可能较慢，仍需原始会话的读取权限。也可用 `--no-index` 主动绕过索引，或在旧版本中重试。显式 `index` 和依赖索引的 `graph` 仍需可写索引；数据库损坏等其他错误会正常报出，无需复制数据库或删除 WAL/SHM 文件来绕过权限限制。
 
@@ -761,3 +761,8 @@ dsh plugin --profile web add ./session-reader-<version>.tgz
 npm 接受发布后可能仍需几分钟才能公开下载，流程会等待 registry metadata。如果发布已成功、后续下载或 Release 附件步骤失败，先确认精确版本的 registry 状态，再补齐同版本附件；不要为补附件再次发布或递增版本。
 
 仓库需要配置 secret `NPM_TOKEN`（npm 上具备该包发布权限的 granular access token）。
+
+
+## 可选语义检索（未发布候选实现）
+
+默认关键词查询不变。增加 `index build/status/forget --semantic` 与 `search --mode semantic`；模型由现有 DreamMate 本地服务提供，向量独立存储。操作、覆盖、分块、离线与数据库兼容规则见 [语义索引说明](docs/semantic-index.md)。旧 index.db 不会自动修改。

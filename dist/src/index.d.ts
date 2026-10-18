@@ -26,3 +26,5 @@ export { apply, inject, name } from './dsh/index.js';
 export { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact, contentPage } from './reader.js';
 export type { ReadOptions, ContentItem } from './reader.js';
 export { callsIn, toolResults } from './calls.js';
+export { retrieveSessions, type RetrievalOptions, type RetrievalResult } from './retrieval.js';
+export { buildSemanticIndex, forgetSemanticSession, semanticStatus, searchSemanticSessions, semanticDbPath, type SemanticOptions, type SemanticStatus, type SemanticClient } from './semantic/index.js';
