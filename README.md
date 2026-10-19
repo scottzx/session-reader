@@ -763,6 +763,11 @@ npm 接受发布后可能仍需几分钟才能公开下载，流程会等待 reg
 仓库需要配置 secret `NPM_TOKEN`（npm 上具备该包发布权限的 granular access token）。
 
 
-## 可选语义检索（未发布候选实现）
+## 可选语义检索（0.11.0）
 
 默认关键词查询不变。增加 `index build/status/forget --semantic` 与 `search --mode semantic`；模型由现有 DreamMate 本地服务提供，向量独立存储。操作、覆盖、分块、离线与数据库兼容规则见 [语义索引说明](docs/semantic-index.md)。旧 index.db 不会自动修改。
+
+
+### 0.11.0 dependency transition
+
+Requires artifact-index ^0.2.0, dreammate-node ^0.15.0 and dreammate-network ^0.5.0. Update the actual DSH consumer profile, not only the global CLI. The new index-v3.db preserves the old index.db; refresh/build explicitly. Raw transcripts and model sharing settings are not migrated or changed by npm installation.

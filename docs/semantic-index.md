@@ -1,4 +1,4 @@
-# 可选会话语义索引（本分支候选实现，尚未发布）
+# 可选会话语义索引（自 0.11.0 起）
 
 关键词检索仍是默认行为。`searchSessions()` 的旧返回类型不变；新增
 `retrieveSessions(query, { mode: 'semantic', model: 'qwen3' })` 返回 `{ hits, retrieval }`。

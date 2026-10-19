@@ -1281,6 +1281,7 @@ test('buildManifest satisfies the dreammate-network node contract', async () => 
   const service = manifest.services[0]!;
   assert.equal(service.id, 'session-registry');
   assert.equal(service.kind, 'session_registry');
+  assert.ok(service.capabilities, 'reader must declare its capability names');
   // The four capability names the design doc pins down, plus turns.
   for (const capability of ['sessions.list', 'sessions.read', 'sessions.search', 'sessions.graph']) {
     assert.ok(service.capabilities.includes(capability), `missing ${capability}`);

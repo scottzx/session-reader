@@ -273,9 +273,9 @@ read it when a question needs something not covered above, such as filtering by
 provider, regex search, tuning context lines, or forcing an index rebuild.
 
 
-## Opt-in semantic search (unreleased branch)
+## Opt-in semantic search (since 0.11.0)
 
-Probe `1session help` first: the older published CLI does not yet expose these flags.
+Probe `1session help` first: versions before 0.11.0 do not expose these flags.
 Default keyword search remains unchanged. A natural-language question may use:
 
 ```sh

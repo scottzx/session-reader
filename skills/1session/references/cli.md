@@ -286,9 +286,9 @@ defaults to `SESSION_READER_CALLER_SESSION`); hits from it come back tagged
 directly. Requires Node.js >= 22.5 (built-in `node:sqlite`), zero runtime deps.
 
 
-## Opt-in semantic search (unreleased branch)
+## Opt-in semantic search (since 0.11.0)
 
-Probe `1session help` first: the older published CLI does not yet expose these flags.
+Probe `1session help` first: versions before 0.11.0 do not expose these flags.
 Default keyword search remains unchanged. A natural-language question may use:
 
 ```sh
