@@ -56,7 +56,7 @@ try {
   assert.equal(schemas.length, 5);
   for (const tool of schemas) {
     assertObjectJsonSchema(tool.parameters);
-    const required = tool.name === 'session_search' ? 'query' : 'sessionId';
+    const required = tool.name === 'history_search' ? 'query' : 'sessionId';
     assert.deepEqual(validateJsonSchemaValue(tool.parameters, { [required]: 'fixture' }), []);
     assert.ok(validateJsonSchemaValue(tool.parameters, {}).length > 0, `${tool.name} requires ${required}`);
     assert.ok(validateJsonSchemaValue(tool.parameters, { [required]: 42 }).length > 0, `${tool.name} rejects a non-string ${required}`);

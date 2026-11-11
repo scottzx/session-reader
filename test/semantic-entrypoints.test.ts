@@ -81,7 +81,7 @@ test('CLI, HTTP, Web API and DSH share the opt-in semantic contract', async t =>
   assert.deepEqual(fromWeb.hits[0].matches,found.hits[0].matches);
   const tools = new Map<string,any>();
   apply({ effect:(fn:()=>unknown)=>fn(), tools:{register:(tool:any)=>{tools.set(tool.name,tool);return ()=>{};}} });
-  const search = tools.get('session_search');
+  const search = tools.get('history_search');
   assert.deepEqual(search.parameters.properties.mode.enum,['keyword','semantic']);
   const fromDsh = await search.execute({query:'phone',scope:'global',mode:'semantic'}, {agent:{session:{header:{id:'another-session'}}}});
   assert.deepEqual(fromDsh.hits[0].matches,found.hits[0].matches);

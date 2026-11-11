@@ -2,7 +2,7 @@
 
 关键词检索仍是默认行为。`searchSessions()` 的旧返回类型不变；新增
 `retrieveSessions(query, { mode: 'semantic', model: 'qwen3' })` 返回 `{ hits, retrieval }`。
-CLI、DSH `session_search`、HTTP `/v1/search` 和 Web API `/api/session-reader/search`
+CLI、DSH `history_search`、HTTP `/v1/search` 和 Web API `/api/session-reader/search`
 复用这层编排。Web 面板尚未增加模式切换控件；通过 API 明确指定模式。
 
 ## 准备、构建和查询

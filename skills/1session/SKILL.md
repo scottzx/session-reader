@@ -289,7 +289,7 @@ Only explicitly build on user-approved local sources. Search never builds automa
 Check `retrieval.partial`, `pendingEvents`, `skippedEvents` and `rawSourceDiscovery:false`:
 coverage is the structural-index snapshot, NOT all raw history or all devices.
 Semantic JSON is `{hits,retrieval}`; keyword JSON retains its old shape.
-Both CLI and DSH `session_search` accept `mode: keyword|semantic` and `model: qwen3|embeddinggemma2`.
+Both CLI and DSH `history_search` accept `mode: keyword|semantic` and `model: qwen3|embeddinggemma2`.
 Qwen uses the existing document_search profile; Gemma document indexing needs the updated shared client.
 Errors are explicit, never silently mix models. Only dialogue is indexed; no tool/thinking text.
 The first implementation limits chunks and questions to 320 UTF-8 bytes (not tokens).

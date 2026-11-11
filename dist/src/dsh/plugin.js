@@ -7,9 +7,9 @@ export const inject = ['tools', 'webServer', 'sessionController', 'workspaceRegi
 export function apply(ctx) {
     // 1. Register tools if ctx.tools is present
     if (ctx.tools && typeof ctx.tools.register === 'function') {
-        // session_search
+        // history_search — DSH core already owns session_search.
         ctx.effect(() => ctx.tools.register({
-            name: 'session_search',
+            name: 'history_search',
             description: 'Search past AI coding sessions across Claude Code, Codex, Antigravity, Grok and DSH. By default searches sessions in the current working directory / workspace.',
             parameters: {
                 type: 'object',

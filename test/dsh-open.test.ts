@@ -23,7 +23,7 @@ test('all DSH tools expose object JSON Schemas with required argument names', as
   t.after(() => { for (const dispose of effects) dispose(); });
 
   const requiredArguments = {
-    session_search: 'query',
+    history_search: 'query',
     session_overview: 'sessionId',
     session_turns: 'sessionId',
     session_turn_detail: 'sessionId',
@@ -41,7 +41,7 @@ test('all DSH tools expose object JSON Schemas with required argument names', as
         assert.equal(property.required, undefined, 'required belongs on the object as an array');
       }
       if (name === 'session_open_in_dsh') assert.equal(parameters.properties.provider.type, 'string');
-      if (name === 'session_search') assert.deepEqual(parameters.properties.terms.items, { type: 'string' });
+      if (name === 'history_search') assert.deepEqual(parameters.properties.terms.items, { type: 'string' });
     });
   }
 });
