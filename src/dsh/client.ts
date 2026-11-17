@@ -388,8 +388,16 @@ export function apply(_ctx: any = {}) {
 
   async function requestJson(url: string, signal?: AbortSignal) {
     const response = await fetch(url, { signal, cache: 'no-store' });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
+    const body = await response.text();
+    let data: any;
+    try {
+      data = body ? JSON.parse(body) : null;
+    } catch {
+      // An unregistered API route answers in plain text; report the status and
+      // what it said instead of a JSON parse error.
+      throw new Error(`HTTP ${response.status}${body ? ': ' + body.slice(0, 120) : ''}`);
+    }
+    if (!response.ok) throw new Error(data?.error || 'HTTP ' + response.status);
     return data;
   }
 
