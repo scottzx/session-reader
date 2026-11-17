@@ -222,6 +222,11 @@ test('DSH browser client bundle registers with ModuleLoader exactly once and exp
   assert.equal(loadCallCount, 1, 'Materialization must NOT call load a second time (no duplicate registration)');
   assert.equal(typeof materialized.apply, 'function', 'Materialized exports must have apply function');
   assert.deepEqual(materialized.inject, ['slots', 'sessions', 'workspaces', 'uiWorkspace', 'uiSession', 'locale'], 'Materialized exports must declare inject');
+
+  // The history entry is a row of the sidebar's "更多" menu; the plugin must not
+  // mount a sidebar control of its own.
+  assert.ok(bundleCode.includes('sidebar.panellist.actions'), 'Bundle must contribute to the sidebar More menu');
+  assert.ok(!bundleCode.includes('data-dsh-session-reader-entry'), 'Bundle must not mount its own sidebar entry');
 });
 
 
