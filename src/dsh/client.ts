@@ -9,63 +9,45 @@ import type { ContentItem } from '../reader.js';
 import type { callsIn } from '../calls.js';
 
 const CSS_TEXT = `
-/* Match DSH SidebarRoot panel rows in expanded and collapsed layouts. */
-[data-dsh-session-reader-entry] {
-  box-sizing: border-box;
-  flex: none;
-  min-height: 36px;
-  margin: 0 2px 4px;
+/* Sidebar "更多" menu row: an occasional lookup, not a permanent panel row. */
+.sr-more-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
   color: var(--dsw-alias-label-primary);
-  cursor: pointer;
-  white-space: nowrap;
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
   background: transparent;
   border: none;
   border-radius: var(--dsw-radius-md);
-  align-items: center;
-  gap: 8px;
-  padding: 7px 8px;
-  font: inherit;
-  line-height: 22px;
-  text-align: left;
-  display: flex;
+  cursor: pointer;
 }
-[data-dsh-session-reader-entry]:hover {
+.sr-more-row:hover {
   background: var(--dsw-alias-interactive-bg-hover);
 }
-[data-dsh-session-reader-entry]:focus-visible {
+.sr-more-row:focus-visible {
   outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: -2px;
 }
-[data-dsh-session-reader-entry] .sr-icon {
+.sr-more-row .sr-icon {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
-[data-dsh-session-reader-entry] .sr-icon svg {
-  width: 16px;
-  height: 16px;
+.sr-more-row .sr-icon svg {
+  width: 14px;
+  height: 14px;
 }
-[data-dsh-session-reader-entry] .sr-label {
+.sr-more-row .sr-label {
   min-width: 0;
   text-overflow: ellipsis;
   overflow: hidden;
-}
-[data-dsh-frame][data-sidebar-collapsed] [data-dsh-session-reader-entry],
-[data-sidebar-collapsed] [data-dsh-session-reader-entry] {
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  margin: 0 0 12px;
-  padding: 0;
-}
-[data-sidebar-collapsed] [data-dsh-session-reader-entry] .sr-icon svg {
-  width: 18px;
-  height: 18px;
-}
-[data-dsh-frame][data-sidebar-collapsed] [data-dsh-session-reader-entry] .sr-label,
-[data-sidebar-collapsed] [data-dsh-session-reader-entry] .sr-label {
-  display: none;
 }
 
 /* Reader: search, confirm the original, and copy a portable reference. */
@@ -213,7 +195,7 @@ body[data-ds-dark-theme] .sr-overlay {
 
 const ICON_SVG = `<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><polyline points="8 4.2 8 8 10.5 9.5"/></svg>`;
 
-export const inject = ['sessions', 'workspaces', 'uiWorkspace', 'uiSession', 'locale'];
+export const inject = ['slots', 'sessions', 'workspaces', 'uiWorkspace', 'uiSession', 'locale'];
 
 interface UiSession extends SessionRef {
   searchMatches?: SearchMatch[];
@@ -1217,63 +1199,31 @@ export function apply(_ctx: any = {}) {
     return;
   }
 
-  // 3. Mount Sidebar Entry
-  function tryMountSidebar() {
-    if (document.querySelector('[data-dsh-session-reader-entry]')) return;
-
-    // Look for sidebar root
-    const column = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
-    if (!column) return;
-    const root = column.querySelector('[class*="logoRow"]')?.parentElement ?? column.firstElementChild;
-    if (!root) return;
-
-    // Look for New Session button
-    let newSessionBtn = root.querySelector('button[class*="newSession"]');
-    if (!newSessionBtn) {
-      for (const child of Array.from(root.children)) {
-        if (child.tagName === 'BUTTON') {
-          newSessionBtn = child;
-          break;
-        }
-      }
-    }
-    if (!newSessionBtn) return;
-
-    // Create entry button
-    const entry = document.createElement('button');
-    entry.type = 'button';
-    entry.setAttribute('data-dsh-session-reader-entry', '');
-    entry.setAttribute('data-dsh-plugin', 'session-reader');
-    entry.setAttribute('data-dsh-part', 'sidebar-entry');
-    entry.setAttribute('title', '历史会话 (Session Reader)：查看跨Agent历史对话与会话详情');
-    entry.setAttribute('aria-label', '历史会话');
-
-    entry.innerHTML = `
-      <span class="sr-icon">${ICON_SVG}</span>
-      <span class="sr-label">历史会话</span>
-    `;
-
-    entry.addEventListener('click', openPanel);
-
-    // Position after other family items (task-board, skill-explorer, etc.)
-    const familySelectors = [
-      '[data-dsh-taskboard-entry]',
-      '[data-dsh-ssh-entry]',
-      '[data-dsh-skill-explorer-entry]',
-      '[data-dsh-session-reader-entry]'
-    ];
-    const family = Array.from(root.children).filter(el => el instanceof HTMLElement && el.matches(familySelectors.join(', ')));
-    const anchor = family.length > 0 ? family[family.length - 1].nextElementSibling : (newSessionBtn.closest('[class*="logoRow"]') ?? newSessionBtn).nextElementSibling;
-    root.insertBefore(entry, anchor);
-  }
-
-  // Observe DOM for sidebar rendering
-  const observer = new MutationObserver(() => {
-    tryMountSidebar();
-  });
-  const target = document.body ?? document.documentElement;
-  if (target) {
-    observer.observe(target, { childList: true, subtree: true });
+  // 3. Contribute the reader to the sidebar's "更多" menu. Reading history is an
+  //    occasional lookup, so it must not hold a permanent panel row of its own.
+  if (_ctx && typeof _ctx.slots?.inject === 'function') {
+    // React comes from the DSH web shell's module table: the bundle marks it
+    // external and resolves it through the module loader's require.
+    const react = require('react') as {
+      createElement: (type: unknown, props?: unknown, ...children: unknown[]) => unknown;
+    };
+    const label = '历史会话';
+    const moreMenuEntry = ({ onDismiss }: { onDismiss: () => void }) =>
+      react.createElement('button', {
+        type: 'button',
+        role: 'menuitem',
+        className: 'sr-more-row',
+        'aria-label': label,
+        onClick: () => { onDismiss(); openPanel(); },
+      },
+      react.createElement('span', {
+        className: 'sr-icon',
+        'aria-hidden': 'true',
+        dangerouslySetInnerHTML: { __html: ICON_SVG },
+      }),
+      react.createElement('span', { className: 'sr-label' }, label));
+    _ctx.slots.inject('sidebar.panellist.actions', () => _ctx.slots.register(
+      { name: 'sidebar.panellist.actions', id: 'session-reader' }, moreMenuEntry));
   }
 }
 

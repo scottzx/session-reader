@@ -17,6 +17,9 @@ const browserBuild = {
   platform: 'browser',
   target: ['es2022'],
   minify: true,
+  // The DSH web shell seeds React in its browser module table; the DSH client
+  // half resolves it through the module loader's require instead of bundling it.
+  external: ['react'],
   loader: { '.ts': 'ts' },
   define: {
     'process.env.NODE_ENV': '"production"',
@@ -34,7 +37,8 @@ try {
   if (!result.outputFiles?.length) throw new Error('esbuild produced no DSH client output');
   const wrapped = `window.__ModuleLoader__.load({
   id: "@1agents/session-reader",
-  factory: (_require) => {
+  dependencies: ["react"],
+  factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
 

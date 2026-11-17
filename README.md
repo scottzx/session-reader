@@ -13,7 +13,7 @@ dsh plugin --profile web add @1agents/session-reader
 dsh web
 ```
 
-包内的 `dsh.bundle.patch` 会在安装时启用插件。已经运行 DSH Web 时，安装或升级后重启服务，再打开侧栏「历史会话」。从 DSH 源码仓库运行时，在以上命令前加 `pnpm`；使用其他 profile 时将 `web` 替换为对应名称。
+包内的 `dsh.bundle.patch` 会在安装时启用插件。已经运行 DSH Web 时，安装或升级后重启服务，再从侧栏面板列表的「更多」菜单打开「历史会话」。从 DSH 源码仓库运行时，在以上命令前加 `pnpm`；使用其他 profile 时将 `web` 替换为对应名称。
 
 ![DSH Web 中的 session-reader 历史会话浏览器](https://raw.githubusercontent.com/scottzx/session-reader/main/docs/screenshots/session-reader-dsh.png)
 
@@ -609,7 +609,7 @@ dsh plugin --profile web add @1agents/session-reader
 
 只查看历史时安装 `@1agents/session-reader` 即可；插件按请求查询 ACP 服务，不把 ACP 注册为加载依赖。从 DSH 源码仓库运行时在命令前加 `pnpm`；桌面版将 profile 改为 `desktop`。更新包后重启对应的 DSH 服务。需要续聊时另运行 `dsh plugin --profile web add @1agents/acp-service`。使用统一包 `@1agents/acp-service@>=0.5.0` 时，插件默认自动启动或复用本地 ACP 服务，无需另开终端；远程地址或 `serviceMode: external` 仍由外部管理。具体配置见 [ACP 插件说明](https://github.com/scottzx/1acp/tree/main/packages/dsh-plugin)。
 
-DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。入口沿用「插件」「自动化任务」的主文字色、字号、行高、圆角、悬停与键盘焦点样式；展开时使用 16px 图标，折叠时使用 18px 图标和 36px 按钮，颜色跟随 DSH 的亮暗主题。
+DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。它挂在侧栏面板列表的「更多」菜单里：历史检索不是高频操作，因此不占用常驻的面板行，也不再自己插入侧栏按钮。菜单行沿用 DSH 菜单项的文字色、字号、行高、圆角与悬停样式，颜色跟随 DSH 的亮暗主题。
 
 ### 在 DSH 中继续原会话
 
