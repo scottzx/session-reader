@@ -255,13 +255,15 @@ export function apply(_ctx: any = {}) {
   const translate = _ctx.locale?.bind('sessionReaderContinuation');
   const getContinuationCopy = () => continuationCopy(translate);
 
-  // 1. Inject Styles
-  if (!document.getElementById('dsh-session-reader-css')) {
-    const style = document.createElement('style');
-    style.id = 'dsh-session-reader-css';
-    style.textContent = CSS_TEXT;
-    document.head.appendChild(style);
+  // 1. Inject Styles. Always refresh the sheet: the page outlives a host restart,
+  //    so an earlier build's <style> can still hold the previous rule set.
+  let styleElement = document.getElementById('dsh-session-reader-css') as HTMLStyleElement | null;
+  if (!styleElement) {
+    styleElement = document.createElement('style');
+    styleElement.id = 'dsh-session-reader-css';
+    document.head.appendChild(styleElement);
   }
+  styleElement.textContent = CSS_TEXT;
 
   // 2. Modal Controller
   let overlayEl: HTMLElement | null = null;
