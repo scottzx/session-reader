@@ -41,8 +41,8 @@ const CSS_TEXT = `
   justify-content: center;
 }
 .sr-more-row .sr-icon svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 .sr-more-row .sr-label {
   min-width: 0;
