@@ -25,12 +25,12 @@ try {
   run(npm,['ci','--ignore-scripts','--no-audit','--no-fund'],consumer);
   const installed=path.join(consumer,'node_modules/@1agents/session-reader');
   const manifest=JSON.parse(fs.readFileSync(path.join(installed,'package.json'),'utf8'));
-  for(const rel of [manifest.main,manifest.types,manifest.bin['1session'],manifest.dsh.bundle.patch,'dist/src/dsh/client.js','dist/src/web/app.js','docs/semantic-index.md','skills/1session/SKILL.md']) {
+  for(const rel of [manifest.main,manifest.types,manifest.bin['1session'],manifest.dsh.bundle.patch,'dist/src/dsh/client.js','dist/src/web/app.js','docs/semantic-index.md','docs/cold-archive.md','skills/1session/SKILL.md']) {
     assert.ok(fs.existsSync(path.join(installed,rel)),`Missing packaged entry: ${rel}`);
   }
-  run(process.execPath,['--input-type=module','-e',`const api=await import('@1agents/session-reader');for(const name of ['searchSessions','retrieveSessions','buildSemanticIndex','semanticStatus','forgetSemanticSession'])if(typeof api[name]!=='function')throw new Error('Missing '+name);`],consumer);
+  run(process.execPath,['--input-type=module','-e',`const api=await import('@1agents/session-reader');for(const name of ['searchSessions','retrieveSessions','buildSemanticIndex','semanticStatus','forgetSemanticSession','archiveSessions','listColdArchive','restoreSession'])if(typeof api[name]!=='function')throw new Error('Missing '+name);`],consumer);
   const help=run(process.execPath,[path.join(installed,manifest.bin['1session']),'help'],consumer);
-  assert.match(help,/--mode keyword\|semantic/);assert.match(help,/index build\|status\|forget --semantic/);
+  assert.match(help,/--mode keyword\|semantic/);assert.match(help,/index build\|status\|forget --semantic/);assert.match(help,/dsh-archive/);
   const refused=spawnSync(process.execPath,[path.join(installed,manifest.bin['1session']),'search','phone','--global','--mode','semantic','--json'],{cwd:consumer,env,encoding:'utf8',timeout:10000});
   assert.equal(refused.status,1);assert.match(refused.stderr,/Structural index is missing/);
   assert.equal(fs.existsSync(env.SESSION_READER_SEMANTIC_DB),false);

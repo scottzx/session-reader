@@ -27,7 +27,11 @@ export interface ListOptions {
     provider?: AgentProvider;
     /** Only sessions updated at or after this moment (`24h`, `7d`, ISO date). */
     since?: string | Date;
+    /** DSH physical state filter. `include` (default) reads both hot and cold sessions. */
+    archive?: 'include' | 'hot' | 'cold';
 }
+/** Cold state is a property of the physical transcript, not of the provider. */
+export declare function matchesArchive(ref: Pick<SessionRef, 'coldArchived'>, archive: ListOptions['archive']): boolean;
 export interface ResolvedSession {
     ref: SessionRef;
     adapter: ProviderAdapter;

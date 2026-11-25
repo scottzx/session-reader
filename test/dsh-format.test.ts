@@ -22,7 +22,9 @@ async function fixture(t: TestContext, run: (dir: string, write: (version: numbe
   const dir = path.join(home, '.dsh', 'sessions', 'project', `session-${id}`);
   await fs.mkdir(dir, { recursive: true });
   const previous = process.env.SESSION_READER_DB;
+  const previousDshHome = process.env.DSH_HOME;
   process.env.SESSION_READER_DB = path.join(home, 'index.db');
+  process.env.DSH_HOME = path.join(home, '.dsh');
   resetStoreCache();
   t.mock.method(os, 'homedir', () => home);
   const write = async (version: number, lines: unknown[]) => {
@@ -35,6 +37,7 @@ async function fixture(t: TestContext, run: (dir: string, write: (version: numbe
   finally {
     (await openStore()).close(); resetStoreCache(); t.mock.restoreAll();
     if (previous === undefined) delete process.env.SESSION_READER_DB; else process.env.SESSION_READER_DB = previous;
+    if (previousDshHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousDshHome;
     await fs.rm(home, { recursive: true, force: true });
   }
 }

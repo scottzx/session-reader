@@ -108,6 +108,8 @@ body[data-ds-dark-theme] .sr-overlay {
 .sr-badge-grok { background: #e0f2fe; color: #0369a1; }
 .sr-badge-codex { background: #dcfce7; color: #15803d; }
 .sr-badge-dsh { background: #dbeafe; color: #1d4ed8; }
+.sr-badge-cold { background: #fef3c7; color: #92400e; }
+body[data-ds-dark-theme] .sr-badge-cold { background: #4a3a10; color: #fde68a; }
 .sr-item-title { font-weight: 600; overflow-wrap: anywhere; margin-bottom: 4px; }
 .sr-item-ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sr-match { display: block; width: 100%; text-align: left; font: inherit; color: inherit; background: var(--sr-bg); border: 1px solid var(--sr-border); border-radius: 6px; padding: 8px 10px; margin-top: 8px; cursor: pointer; overflow-wrap: anywhere; }
@@ -221,6 +223,8 @@ interface SessionView {
   continuation?: any;
   continuationError?: string;
   continuationBusy?: boolean;
+  restoring?: boolean;
+  restoreError?: string;
 }
 
 interface Inspection {
@@ -371,6 +375,33 @@ export function apply(_ctx: any = {}) {
       }
     } finally {
       view.continuationBusy = false;
+      if (activeSessionData === view) renderModalBody();
+    }
+  }
+
+  async function restoreColdSession(sessionId: string) {
+    const view = activeSessionData;
+    if (!view || view.restoring) return;
+    view.restoring = true;
+    view.restoreError = undefined;
+    renderModalBody();
+    try {
+      const res = await fetch('/api/session-reader/cold-archive/restore', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+      const result = await res.json();
+      if (!res.ok || !result.restored) throw new Error(result.error || res.statusText);
+      view.ref = { ...view.ref, coldArchived: false };
+      cachedSessions = cachedSessions.map((session) => sessionKey(session) === sessionId ? { ...session, coldArchived: false } : session);
+      sessionViews.delete(sessionId);
+      renderSessionList();
+      renderModalBody();
+    } catch (error: any) {
+      view.restoreError = '还原失败：' + (error?.message || error);
+      if (activeSessionData === view) renderModalBody();
+    } finally {
+      view.restoring = false;
       if (activeSessionData === view) renderModalBody();
     }
   }
@@ -727,6 +758,8 @@ export function apply(_ctx: any = {}) {
       const value = (selector: string) => overlayEl!.querySelector<HTMLInputElement | HTMLSelectElement>(selector)!.value;
       queryText = value('.sr-search-input').trim();
       queryParams = new URLSearchParams({ limit: '50', scope: value('.sr-select-scope'), area: value('.sr-select-area') });
+      const archive = value('.sr-select-archive');
+      if (archive) queryParams.set('archive', archive);
       const workspace = getActiveWorkspaceInfo().cwd;
       if (queryParams.get('scope') === 'cwd' && !workspace) {
         cachedSessions = [];
@@ -811,6 +844,7 @@ export function apply(_ctx: any = {}) {
       item.innerHTML = '<button type="button" class="sr-session-select">' +
         '<div class="sr-item-header">' +
         '<span class="sr-badge sr-badge-' + escapeHtml(session.provider) + '">' + escapeHtml(session.provider) + '</span>' +
+        (session.coldArchived ? '<span class="sr-badge sr-badge-cold">冷归档</span>' : '') +
         '<span class="sr-item-time">' + escapeHtml(time) + '</span>' +
         '</div>' +
         '<div class="sr-item-title">' + highlightHtml(session.title || '未命名会话') + '</div>' +
@@ -903,7 +937,7 @@ export function apply(_ctx: any = {}) {
       '<button class="sr-btn sr-primary" id="sr-copy-agent">复制引用给 Agent</button>' +
       '</div>' +
       '</div>' +
-      '<div class="sr-header-path">' + escapeHtml(ref.provider) + ' · ' + escapeHtml(ref.workspace?.split('/').pop() || '未记录项目') + (ref.createdAt ? ' · ' + new Date(ref.createdAt).toLocaleDateString('zh-CN') : '') + ' · ' + view.turns.length + ' 轮</div>' +
+      '<div class="sr-header-path">' + escapeHtml(ref.provider) + ' · ' + escapeHtml(ref.workspace?.split('/').pop() || '未记录项目') + (ref.coldArchived ? ' · 冷归档' : '') + (ref.createdAt ? ' · ' + new Date(ref.createdAt).toLocaleDateString('zh-CN') : '') + ' · ' + view.turns.length + ' 轮</div>' +
       '<div class="sr-reader-toolbar">' +
       '<button class="sr-btn" id="sr-toggle-directory" aria-expanded="' + showDirectory + '">轮次目录</button>' +
       '<button class="sr-btn" id="sr-toggle-details" aria-expanded="' + showDetails + '">辅助详情</button>' + (matches.length ? '<span class="sr-message-meta">命中 ' + (selectedMatch >= 0 ? selectedMatch + 1 : '—') + ' / ' + matches.length + '</span>' +
@@ -923,6 +957,21 @@ export function apply(_ctx: any = {}) {
     };
     bind('#sr-copy-id', (button) => copyText(sessionKey(ref), button));
     bind('#sr-copy-agent', (button) => copyText(agentReference(ref), button));
+    if (ref.coldArchived && ref.provider === 'dsh') {
+      const button = document.createElement('button');
+      button.className = 'sr-btn';
+      button.id = 'sr-restore-cold';
+      button.disabled = Boolean(view.restoring);
+      button.textContent = view.restoring ? '还原中…' : '还原到 DSH 热目录';
+      button.addEventListener('click', () => restoreColdSession(sessionKey(ref)));
+      content.querySelector('#sr-copy-agent')!.after(button);
+      if (view.restoreError) {
+        const notice = document.createElement('p');
+        notice.className = 'sr-message-meta sr-error';
+        notice.textContent = view.restoreError;
+        content.querySelector('.sr-content-header')!.appendChild(notice);
+      }
+    }
     if (!isStandalone()) {
       const copy = getContinuationCopy();
       const button = document.createElement('button');
@@ -1135,6 +1184,11 @@ export function apply(_ctx: any = {}) {
       '<option value="grok">Grok</option>' +
       '<option value="codex">Codex</option>' +
       '<option value="dsh">DSH</option>' +
+      '</select>' +
+      '<select class="sr-select sr-select-archive" aria-label="归档状态">' +
+      '<option value="">全部状态</option>' +
+      '<option value="hot">仅热会话</option>' +
+      '<option value="cold">仅冷归档</option>' +
       '</select>' +
       '<select class="sr-select sr-select-since" aria-label="更新时间">' +
       '<option value="">全部时间</option>' +

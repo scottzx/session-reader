@@ -28,15 +28,17 @@ test('all DSH tools expose object JSON Schemas with required argument names', as
     session_turns: 'sessionId',
     session_turn_detail: 'sessionId',
     session_open_in_dsh: 'sessionId',
+    cold_archive_list: undefined,
+    cold_archive_restore: 'sessionId',
   };
   assert.deepEqual([...tools.keys()], Object.keys(requiredArguments));
   for (const [name, required] of Object.entries(requiredArguments)) {
     await t.test(name, () => {
       const parameters = JSON.parse(JSON.stringify(tools.get(name).parameters));
       assert.equal(parameters.type, 'object', `${name} must be accepted by the model API`);
-      assert.ok(parameters.properties && Object.keys(parameters.properties).length > 0);
-      assert.deepEqual(parameters.required, [required]);
-      assert.equal(parameters.properties[required].type, 'string');
+      assert.ok(parameters.properties && (name.startsWith('cold_archive_') ? true : Object.keys(parameters.properties).length > 0));
+      assert.deepEqual(parameters.required, required ? [required] : []);
+      if (required) assert.equal(parameters.properties[required].type, 'string');
       for (const property of Object.values(parameters.properties) as { required?: unknown }[]) {
         assert.equal(property.required, undefined, 'required belongs on the object as an array');
       }

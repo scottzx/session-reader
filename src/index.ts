@@ -40,6 +40,7 @@ export {
   findSessionsByWorkspace,
   listRecentSessions,
   listResolvedSessions,
+  matchesArchive,
   parseSession,
   parseSince,
   resolveSession,
@@ -152,6 +153,25 @@ export {
 export { createServer, serve, type ServeOptions } from './serve/http.js';
 export { convertSessionToDshEvents, type DshSessionEvent, type ConvertOptions } from './dsh/adapter.js';
 export { apply, inject, name } from './dsh/index.js';
+
+export {
+  archiveSessions,
+  coldIndexPath,
+  dshPaths,
+  isColdArchivePath,
+  listColdArchive,
+  planArchive,
+  restoreSession,
+  type ArchiveOptions,
+  type ArchivePlan,
+  type ArchivePlanItem,
+  type ArchiveResult,
+  type ArchivedEntry,
+  type ColdArchiveIndex,
+  type DshPaths,
+  type RestoreOptions,
+  type RestoreResult,
+} from './dsh/archive.js';
 
 export { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact, contentPage } from './reader.js';
 export type { ReadOptions, ContentItem } from './reader.js';

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { adapters, listResolvedSessions, parseSince, type ListOptions } from './resolver.js';
+import { adapters, listResolvedSessions, matchesArchive, parseSince, type ListOptions } from './resolver.js';
 import { turnNoAt, turnStarts } from './turns.js';
 import { canonicalizePath, isInside } from './util/paths.js';
 import type { NormalizedSession, SessionRef, TurnKind } from './types.js';
@@ -480,6 +480,7 @@ async function searchByParsing(options: SearchOptions, patterns: RegExp[]): Prom
   const { resolveSession } = await import('./resolver.js');
   const target = options.sessionId ? await resolveSession(options.sessionId, options.provider) : undefined;
   if (options.sessionId && !target) throw new Error(`session not found: ${options.sessionId}`);
+  if (target && !matchesArchive(target.ref, options.archive)) return [];
   const handles = target ? [target] : await listResolvedSessions({ ...options, limit: Infinity, scan: Infinity });
   const hits: SearchHit[] = [];
   const kinds = new Set(kindsOf(options));
@@ -506,11 +507,13 @@ async function searchByIndex(options: SearchOptions, patterns: RegExp[]): Promis
     const row = findSessionRow(db, options.sessionId);
     const target = (row && row.id.toLowerCase() === options.sessionId.toLowerCase() ? await indexedHandle(row) : undefined) ?? await resolveSession(options.sessionId, options.provider);
     if (!target) throw new Error(`session not found: ${options.sessionId}`);
+    if (!matchesArchive(target.candidate, options.archive)) return [];
     ids.push((await refreshSession(db, target, { edges: false })).id);
   } else {
     for (const adapter of adapters) {
       if (options.provider && adapter.provider !== options.provider) continue;
       for (const candidate of await adapter.listCandidates()) {
+        if (!matchesArchive(candidate, options.archive)) continue;
         if (sinceMs && candidate.mtimeMs < sinceMs) break;
         if (options.workspace && adapter.workspaceOf?.(candidate) && !isInside(canonicalizePath(options.workspace), adapter.workspaceOf(candidate)!)) continue;
         ids.push((await refreshSession(db, { adapter, candidate }, { edges: false })).id);

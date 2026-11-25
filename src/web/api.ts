@@ -83,6 +83,7 @@ export async function listSessionsForUi(options: {
   provider?: string;
   since?: string;
   workspace?: string;
+  archive?: 'include' | 'hot' | 'cold';
 }) {
   const limit = options.limit ?? 50;
   const offset = options.offset ?? 0;
@@ -93,6 +94,7 @@ export async function listSessionsForUi(options: {
     provider: options.provider as AgentProvider | undefined,
     since: options.since,
     workspace: options.workspace,
+    archive: options.archive,
     useIndex: false,
     scan: Infinity,
   });
@@ -131,7 +133,9 @@ export async function handleSessionApi(
       url.searchParams.get('workspace'),
       options.fallbackCwd,
     );
-    const sessions = await listSessionsForUi({ limit: limit + 1, offset, provider, since, workspace });
+    const archiveParam = url.searchParams.get('archive');
+    const archive = archiveParam === 'hot' || archiveParam === 'cold' ? archiveParam : 'include';
+    const sessions = await listSessionsForUi({ limit: limit + 1, offset, provider, since, workspace, archive });
     sendJson(res, 200, { sessions: sessions.slice(0, limit), hasMore: sessions.length > limit,
       ...(sessions.length > limit ? { nextOffset: offset + limit } : {}) });
     return true;
@@ -150,6 +154,7 @@ export async function handleSessionApi(
     );
     try {
       const retrieved = await retrieveSessions(query, { workspace, since, provider, limit,
+        archive: url.searchParams.get('archive') === 'cold' ? 'cold' : url.searchParams.get('archive') === 'hot' ? 'hot' : 'include',
         mode: url.searchParams.get('mode') as never || undefined, model: url.searchParams.get('model') as never || undefined,
         area: url.searchParams.get('area') as never || undefined, sessionId: url.searchParams.get('session') ?? undefined,
         terms: url.searchParams.getAll('term').length ? url.searchParams.getAll('term') : undefined,

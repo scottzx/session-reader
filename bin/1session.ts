@@ -9,6 +9,12 @@ import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '
 import { listRecentSessions, loadSession } from '../src/resolver.js';
 import { listProjects, listProjectWeeks, type ProjectOptions } from '../src/projects.js';
 import { retrieveSessions } from '../src/retrieval.js';
+import {
+  archiveSessions,
+  listColdArchive,
+  restoreSession,
+  DEFAULT_RETENTION_DAYS,
+} from '../src/dsh/archive.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
 import type { SkillAgent } from '../src/skill.js';
@@ -16,7 +22,7 @@ import type { DigestFocus, FileGroup, NormalizedSession, TurnKind } from '../src
 
 const USAGE = `1session — cross-agent session Read Plane
 
-  1session list [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--since 24h] [--json]
+  1session list [--limit <n>] [--scope <path>|cwd|global] [--provider <name>] [--since 24h] [--archive include|hot|cold] [--json]
   1session projects [--weekly] [--page <n>] [--limit <n>] [--scope <path>|cwd|global] [--provider <name>]
                           [--project-map <file.json>] [--timezone <IANA zone>] [--json]
                           跨智能体合并项目；--weekly 按周统计，均从新到旧分页（默认 global）
@@ -33,7 +39,9 @@ const USAGE = `1session — cross-agent session Read Plane
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session index [<session-id>] [--all] [--scope <path>|cwd|global] [--force] [--since 30d]  建立/刷新索引
   1session index build|status|forget --semantic [--model qwen3|embeddinggemma2] [--session <id>] [--global] [--json]
-  1session graph <session-id> [--json]                 会话之间的引用关系
+  1session dsh-archive [--list | --restore <session-id> | --session <session-id>] [--days <n>] [--dry-run] [--json]
+                           DSH 真归档（默认 7 天，仅已标记归档且非置顶）：冷迁出 / 列表 / 一键还原；--dry-run 完全只读
+   1session graph <session-id> [--json]                 会话之间的引用关系
   1session serve [--port 7777] [--host 127.0.0.1] [--token <t>] [--no-report]
                           起 HTTP Service，把本机会话接入 DreamMate Network
   1session web [--port 7780] [--host 127.0.0.1] [--open] [--scope <path>|cwd|global]
@@ -44,7 +52,7 @@ const USAGE = `1session — cross-agent session Read Plane
                           [--kind user,assistant,thinking,tool_call,tool_result]
                           [--regex] [--case] [--context n] [--max-hits n]
                           [--area dialogue|tools|artifacts|all] [--session <id>]
-                          [--terms <JSON array>] [--operator and|or] [--sort relevance|time] [--cursor <cursor>]
+                          [--terms <JSON array>] [--operator and|or] [--sort relevance|time] [--cursor <cursor>] [--archive include|hot|cold]
                           [--include-self] [--mode keyword|semantic] [--model qwen3|embeddinggemma2] [--json]
 
 search 命中附带稳定 locator；元数据与产物命中不属于某一轮。--raw 按需读取原始记录。
@@ -69,7 +77,7 @@ interface Args {
 /** Flags that never take a value, so they cannot swallow a positional. */
 const BOOLEAN_FLAGS = new Set([
   'json', 'failed', 'digest', 'regex', 'case', 'all', 'force', 'no-index', 'global',
-  'copy', 'dry-run', 'no-report', 'include-self', 'open', 'weekly', 'semantic',
+  'copy', 'dry-run', 'no-report', 'include-self', 'open', 'weekly', 'semantic', 'list',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -124,6 +132,15 @@ const focusOf = (value: string | boolean | undefined): DigestFocus => {
   return focus === 'marketing' || focus === 'full' ? focus : 'review';
 };
 
+/** Physical DSH state filter shared by list and search. */
+function archiveOf(flags: Record<string, string | boolean>): 'include' | 'hot' | 'cold' {
+  const value = str(flags.archive) ?? 'include';
+  if (value !== 'include' && value !== 'hot' && value !== 'cold') {
+    throw new Error('--archive must be include, hot or cold');
+  }
+  return value;
+}
+
 /**
  * Which folder a listing covers. `cwd` (the default) is the current working
  * directory, `global` is everything, and anything else is read as a path —
@@ -171,7 +188,8 @@ async function main(): Promise<void> {
   const json = flags.json === true;
   for (const key of ['mode', 'model']) if (flags[key] !== undefined && !str(flags[key])) throw new Error(`--${key} requires a value`);
   useIndex = flags['no-index'] !== true;
-  if (!(command === 'index' && flags.semantic === true) && !(command === 'search' && flags.mode === 'semantic')) await noteRead(command, positional[0]);
+  // dsh-archive --dry-run must be strictly read-only, including the index.
+  if (command !== 'dsh-archive' && !(command === 'index' && flags.semantic === true) && !(command === 'search' && flags.mode === 'semantic')) await noteRead(command, positional[0]);
 
   switch (command) {
     case 'projects': {
@@ -224,6 +242,7 @@ async function main(): Promise<void> {
         since: str(flags.since),
         provider: str(flags.provider) as never,
         useIndex,
+        archive: archiveOf(flags),
       });
       print(
         json,
@@ -231,11 +250,45 @@ async function main(): Promise<void> {
         refs
           .map(
             (ref) =>
-              `${ref.provider.padEnd(11)} ${ref.id.slice(0, 8)}  ${ref.updatedAt ?? '?'}  ` +
+              `${ref.provider.padEnd(11)} ${ref.coldArchived ? '冷归档' : '热目录'} ${ref.id.slice(0, 8)}  ${ref.updatedAt ?? '?'}  ` +
               `${ref.workspace ? path.basename(ref.workspace) : '-'}  ${oneLine(ref.title, 70)}`,
           )
           .join('\n') || '(no sessions found)',
       );
+      break;
+    }
+
+    case 'dsh-archive': {
+      const dryRun = flags['dry-run'] === true;
+      if (flags.list === true) {
+        const entries = await listColdArchive();
+        print(json, entries, entries.length
+          ? entries.map((entry) =>
+            `${entry.sessionId.slice(0, 8)}  ${entry.workspaceDir}/${entry.nativeDir}  ` +
+            `${entry.archivedAt}  ${(entry.sizeBytes / 1024 / 1024).toFixed(2)} MB  → ${entry.archivePath}`).join('\n')
+          : '(cold archive is empty)');
+        break;
+      }
+      const restoreId = str(flags.restore);
+      if (restoreId) {
+        const result = await restoreSession({ sessionId: restoreId, dryRun });
+        print(json, result, `${dryRun ? '将还原' : '已还原'} ${result.sessionId}：${result.from} → ${result.to}` +
+          (result.backupPath ? `\nworkspace.json 备份：${result.backupPath}` : ''));
+        break;
+      }
+      const days = flags.days === undefined ? DEFAULT_RETENTION_DAYS : num(flags.days) ?? NaN;
+      if (!Number.isFinite(days) || days < 0) throw new Error('--days must be a non-negative number');
+      const sessionId = str(flags.session);
+      const result = await archiveSessions({ ...(sessionId ? { sessionId } : {}), days, dryRun });
+      const report = [
+        `${dryRun ? '只读预览' : '已执行'}冷归档 · 条件：${days === 0 ? '全部已归档会话' : `mtime 早于 ${days} 天`}`,
+        `可迁移 ${result.eligible.length} 个会话 · 跳过 ${result.skipped.length} 个 · 可释放 ${(result.bytes / 1024 / 1024).toFixed(2)} MB`,
+        ...result.skipped.slice(0, 10).map((item) => `  跳过 ${item.sessionId.slice(0, 8)}：${item.reason}`),
+        ...(dryRun ? result.eligible.slice(0, 20).map((item) => `  将迁移 ${item.sessionId.slice(0, 8)}  ${item.workspaceDir}/${item.nativeDir}  ${(item.sizeBytes / 1024 / 1024).toFixed(2)} MB`) : []),
+        ...result.moved.map((item) => `  ${dryRun ? '将迁移' : '已迁移'} ${item.sessionId.slice(0, 8)}  ${item.workspaceDir}/${item.nativeDir}`),
+        ...(result.backupPath ? [`workspace.json 备份：${result.backupPath}`] : []),
+      ];
+      print(json, result, report.join('\n'));
       break;
     }
 
@@ -451,6 +504,7 @@ async function main(): Promise<void> {
         operator: str(flags.operator) as never,
         sort: str(flags.sort) as never,
         cursor: str(flags.cursor),
+        archive: archiveOf(flags),
       });
       const found = retrieved.hits;
       // The searcher's own live transcript is noise by default: the query is

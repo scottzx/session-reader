@@ -1,9 +1,22 @@
 import { resolveSession, retrieveSessions, buildOverview, readTurnDirectory, readTurns, readOriginalRecords, readEvents, readCall, readArtifact, } from '../index.js';
 import { handleSessionApi } from '../web/api.js';
 import { openSessionInDsh, continuationAvailability } from './open.js';
+import { listColdArchive, restoreSession } from './archive.js';
 export const name = 'session-reader';
 // ACP is queried through ctx.get so history browsing remains available without it.
 export const inject = ['tools', 'webServer', 'sessionController', 'workspaceRegistry'];
+async function readJsonBody(req) {
+    let body = '';
+    for await (const chunk of req) {
+        body += String(chunk);
+        if (body.length > 16384)
+            throw new Error('Request body too large');
+    }
+    const value = JSON.parse(body);
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw new Error('Request body must be a JSON object');
+    return value;
+}
 export function apply(ctx) {
     // 1. Register tools if ctx.tools is present
     if (ctx.tools && typeof ctx.tools.register === 'function') {
@@ -24,6 +37,7 @@ export function apply(ctx) {
                     limit: { type: 'number', description: 'Max number of sessions to return' },
                     area: { type: 'string', description: 'dialogue (default), tools, artifacts, or all' },
                     sessionId: { type: 'string', description: 'Restrict search to one exact session or unique prefix' },
+                    archive: { type: 'string', enum: ['include', 'hot', 'cold'], description: 'DSH physical state: include (default), hot, or cold-archived' },
                     terms: { type: 'array', items: { type: 'string' }, description: 'Explicit literal terms' },
                     operator: { type: 'string', description: 'and (default) or or' },
                     sort: { type: 'string', description: 'relevance (default) or time' },
@@ -58,6 +72,7 @@ export function apply(ctx) {
                     kinds: args.kind ? [args.kind] : undefined,
                     limit: args.limit,
                     area: args.area, sessionId: args.sessionId, terms: args.terms, operator: args.operator, sort: args.sort, cursor: args.cursor,
+                    archive: args.archive,
                 });
                 return retrieved.retrieval.mode === 'semantic' ? retrieved : retrieved.hits;
             },
@@ -169,6 +184,37 @@ export function apply(ctx) {
                 return openSessionInDsh(ctx, { sessionId: args.sessionId, provider: args.provider });
             },
         }));
+        // cold_archive_list — browse physically archived sessions without DSH's hot list.
+        ctx.effect(() => ctx.tools.register({
+            name: 'cold_archive_list',
+            description: 'List DSH sessions physically moved to the cold archive, with their original workspace and archive metadata.',
+            parameters: { type: 'object', properties: {}, required: [] },
+            output: {
+                schema: { type: 'object' },
+                render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
+            },
+            async execute() {
+                const entries = await listColdArchive();
+                return { count: entries.length, sessions: entries };
+            },
+        }));
+        // cold_archive_restore — move a cold session back into DSH's hot tree.
+        ctx.effect(() => ctx.tools.register({
+            name: 'cold_archive_restore',
+            description: 'Restore one cold-archived DSH session to its original hot directory so DSH can open it again. Refuses to overwrite an existing target.',
+            parameters: {
+                type: 'object',
+                properties: { sessionId: { type: 'string', description: 'Cold-archived session id or unique prefix' } },
+                required: ['sessionId'],
+            },
+            output: {
+                schema: { type: 'object' },
+                render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
+            },
+            async execute(args) {
+                return restoreSession({ sessionId: args.sessionId });
+            },
+        }));
     }
     // 2. Register HTTP routes if ctx.webServer is present
     if (ctx.webServer && typeof ctx.webServer.register === 'function') {
@@ -206,19 +252,43 @@ export function apply(ctx) {
                             res.end(JSON.stringify({ error: 'Cross-origin session imports are not allowed' }));
                             return;
                         }
-                        let body = '';
-                        for await (const chunk of req) {
-                            body += String(chunk);
-                            if (body.length > 16384)
-                                throw new Error('Request body too large');
-                        }
-                        const value = JSON.parse(body);
+                        const value = await readJsonBody(req);
                         if (typeof value.sessionId !== 'string' || !value.sessionId || (value.provider !== undefined && typeof value.provider !== 'string')) {
                             res.statusCode = 400;
                             res.end(JSON.stringify({ error: 'sessionId and optional provider must be strings' }));
                             return;
                         }
                         res.end(JSON.stringify(await openSessionInDsh(ctx, { sessionId: value.sessionId, provider: value.provider })));
+                        return;
+                    }
+                    if (pathname === '/cold-archive/list') {
+                        if (req.method !== 'GET') {
+                            res.statusCode = 405;
+                            res.end(JSON.stringify({ error: 'Use GET to list the cold archive' }));
+                            return;
+                        }
+                        const sessions = await listColdArchive();
+                        res.end(JSON.stringify({ count: sessions.length, sessions }));
+                        return;
+                    }
+                    if (pathname === '/cold-archive/restore') {
+                        if (req.method !== 'POST') {
+                            res.statusCode = 405;
+                            res.end(JSON.stringify({ error: 'Use POST to restore a session' }));
+                            return;
+                        }
+                        if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) {
+                            res.statusCode = 403;
+                            res.end(JSON.stringify({ error: 'Cross-origin cold archive changes are not allowed' }));
+                            return;
+                        }
+                        const value = await readJsonBody(req);
+                        if (typeof value.sessionId !== 'string' || !value.sessionId) {
+                            res.statusCode = 400;
+                            res.end(JSON.stringify({ error: 'sessionId must be a non-empty string' }));
+                            return;
+                        }
+                        res.end(JSON.stringify(await restoreSession({ sessionId: value.sessionId, dryRun: value.dryRun === true })));
                         return;
                     }
                     const handled = await handleSessionApi(pathname, url, res, { fallbackCwd: process.cwd() });

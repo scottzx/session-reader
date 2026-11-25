@@ -5,6 +5,16 @@
 CLI、DSH `history_search`、HTTP `/v1/search` 和 Web API `/api/session-reader/search`
 复用这层编排。Web 面板尚未增加模式切换控件；通过 API 明确指定模式。
 
+## 冷归档与检索范围（自 0.12.5 起）
+
+DSH 会话可被物理迁移到 `~/.dsh/sessions-archive/`（见 `docs/cold-archive.md`）。
+所有发现/检索入口默认 `archive: 'include'`，同时读取热目录与冷归档；显式
+`archive: 'hot' | 'cold'` 只取其中一种。`SessionRef.coldArchived: true` 标记
+物理冷归档状态，不改变 `provider: 'dsh'` 身份。CLI 为 `--archive`、HTTP 为
+`?archive=`，DSH `history_search` 为同名参数。语义索引仍只覆盖结构化索引快照；
+冷归档会话必须先被结构化索引收录才可能出现在语义结果中，关键词检索则以磁盘
+两套目录为发现源。
+
 ## 准备、构建和查询
 
 ```sh

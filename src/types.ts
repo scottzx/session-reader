@@ -25,6 +25,8 @@ export interface SessionRef {
   createdAt?: string;
   updatedAt?: string;
   sizeBytes?: number;
+  /** DSH session physically moved to `~/.dsh/sessions-archive/`; still readable. */
+  coldArchived?: boolean;
 }
 
 export type TurnKind = 'user' | 'assistant' | 'thinking' | 'tool_call' | 'tool_result';

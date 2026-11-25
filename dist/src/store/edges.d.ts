@@ -18,8 +18,8 @@ export interface EdgeCandidate {
 export declare function invocationsOf(event: TurnEvent): EdgeCandidate[];
 /**
  * Derives L3 for one session from its stored events. Targets that do not
- * resolve to an indexed session are dropped — a dangling edge is worse than
- * no edge.
+ * resolve uniquely to an indexed session are dropped — a dangling or guessed
+ * edge is worse than no edge.
  */
 export declare function deriveEdges(db: DatabaseSync, id: string, session: NormalizedSession): number;
 /**

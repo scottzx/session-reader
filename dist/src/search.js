@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { adapters, listResolvedSessions, parseSince } from './resolver.js';
+import { adapters, listResolvedSessions, matchesArchive, parseSince } from './resolver.js';
 import { turnNoAt, turnStarts } from './turns.js';
 import { canonicalizePath, isInside } from './util/paths.js';
 import { tryIndex } from './store/db.js';
@@ -417,6 +417,8 @@ async function searchByParsing(options, patterns) {
     const target = options.sessionId ? await resolveSession(options.sessionId, options.provider) : undefined;
     if (options.sessionId && !target)
         throw new Error(`session not found: ${options.sessionId}`);
+    if (target && !matchesArchive(target.ref, options.archive))
+        return [];
     const handles = target ? [target] : await listResolvedSessions({ ...options, limit: Infinity, scan: Infinity });
     const hits = [];
     const kinds = new Set(kindsOf(options));
@@ -445,6 +447,8 @@ async function searchByIndex(options, patterns) {
         const target = (row && row.id.toLowerCase() === options.sessionId.toLowerCase() ? await indexedHandle(row) : undefined) ?? await resolveSession(options.sessionId, options.provider);
         if (!target)
             throw new Error(`session not found: ${options.sessionId}`);
+        if (!matchesArchive(target.candidate, options.archive))
+            return [];
         ids.push((await refreshSession(db, target, { edges: false })).id);
     }
     else {
@@ -452,6 +456,8 @@ async function searchByIndex(options, patterns) {
             if (options.provider && adapter.provider !== options.provider)
                 continue;
             for (const candidate of await adapter.listCandidates()) {
+                if (!matchesArchive(candidate, options.archive))
+                    continue;
                 if (sinceMs && candidate.mtimeMs < sinceMs)
                     break;
                 if (options.workspace && adapter.workspaceOf?.(candidate) && !isInside(canonicalizePath(options.workspace), adapter.workspaceOf(candidate)))

@@ -1,12 +1,12 @@
 import { sourceEvents, existingTitles } from './source.js';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { readJsonl } from '../util/jsonl.js';
 import { readZstdJsonl } from '../util/zstd.js';
 import { canonicalizePath } from '../util/paths.js';
 import { looksLikeInstructions, oneLine, stripPromptEnvelope } from '../util/text.js';
 import { toolArgsOf, type ProviderAdapter, type SessionCandidate } from './provider.js';
+import { dshPaths } from '../dsh/archive.js';
 import {
   emptyProviderStats,
   type NormalizedSession,
@@ -124,26 +124,40 @@ export const dshAdapter: ProviderAdapter = {
   provider: 'dsh',
 
   async listCandidates(): Promise<SessionCandidate[]> {
-    const sessionsDir = path.join(os.homedir(), '.dsh', 'sessions');
-    let projects: string[];
-    try {
-      projects = await fs.readdir(sessionsDir);
-    } catch {
-      return [];
-    }
+    const { sessionsDir, archiveDir } = dshPaths();
     const found: SessionCandidate[] = [];
-    for (const project of projects) {
-      const dir = path.join(sessionsDir, project);
-      for (const entry of await fs.readdir(dir).catch(() => [] as string[])) {
-        // The directory is `session-<uuid>`; the id is the uuid, so a short id
-        // means the same thing here as it does for every other provider.
-        const id = SESSION_DIR.exec(entry)?.[1];
-        if (!id) continue;
-        const file = await dshTranscriptPath(path.join(dir, entry));
-        if (!file) continue;
-        const stat = await fs.stat(file).catch(() => undefined);
-        if (!stat) continue;
-        found.push({ id, path: file, mtimeMs: stat.mtimeMs, sizeBytes: stat.size });
+    const seen = new Map<string, number>();
+    // Cold sessions are part of the readable corpus, but a live copy always wins.
+    for (const [root, coldArchived] of [[sessionsDir, false], [archiveDir, true]] as const) {
+      let projects: string[];
+      try {
+        projects = await fs.readdir(root);
+      } catch {
+        continue;
+      }
+      for (const project of projects) {
+        const dir = path.join(root, project);
+        for (const entry of await fs.readdir(dir).catch(() => [] as string[])) {
+          // The directory is `session-<uuid>`; the id is the uuid, so a short id
+          // means the same thing here as it does for every other provider.
+          const id = SESSION_DIR.exec(entry)?.[1];
+          if (!id) continue;
+          const file = await dshTranscriptPath(path.join(dir, entry));
+          if (!file) continue;
+          const stat = await fs.stat(file).catch(() => undefined);
+          if (!stat) continue;
+          const candidate: SessionCandidate = { id, path: file, mtimeMs: stat.mtimeMs, sizeBytes: stat.size };
+          if (coldArchived) candidate.coldArchived = true;
+          const key = id.toLowerCase();
+          const previous = seen.get(key);
+          if (previous !== undefined) {
+            if (coldArchived) continue;
+            found[previous] = candidate;
+          } else {
+            seen.set(key, found.length);
+            found.push(candidate);
+          }
+        }
       }
     }
     return found.sort((a, b) => b.mtimeMs - a.mtimeMs);
@@ -182,6 +196,7 @@ export const dshAdapter: ProviderAdapter = {
       ...(createdAt ? { createdAt } : {}),
       updatedAt: new Date(candidate.mtimeMs).toISOString(),
       sizeBytes: candidate.sizeBytes,
+      ...(candidate.coldArchived ? { coldArchived: true } : {}),
     };
   },
 
@@ -349,6 +364,7 @@ export const dshAdapter: ProviderAdapter = {
         ...(createdAt ? { createdAt } : {}),
         updatedAt: updatedAt ?? new Date(candidate.mtimeMs).toISOString(),
         sizeBytes: candidate.sizeBytes,
+        ...(candidate.coldArchived ? { coldArchived: true } : {}),
       },
       turns,
       artifacts: [],

@@ -2,6 +2,7 @@ import { selectSession } from '../identity.js';
 import { decodeText } from './nul.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { turnStartsFrom } from '../turns.js';
+import { isColdArchivePath } from '../dsh/archive.js';
 import {
   emptyProviderStats,
   type AgentProvider,
@@ -139,6 +140,7 @@ export function refOf(row: SessionRow): SessionRef {
     ...(row.ended_at === null ? {} : { updatedAt: row.ended_at }),
     sizeBytes: row.source_size,
     ...(row.ref_json ? JSON.parse(row.ref_json) : {}),
+    ...(isColdArchivePath(row.source_path) ? { coldArchived: true } : {}),
   };
 }
 

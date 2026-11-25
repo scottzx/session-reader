@@ -67,6 +67,7 @@ export async function listSessionsForUi(options) {
         provider: options.provider,
         since: options.since,
         workspace: options.workspace,
+        archive: options.archive,
         useIndex: false,
         scan: Infinity,
     });
@@ -94,7 +95,9 @@ export async function handleSessionApi(pathname, url, res, options) {
         const provider = url.searchParams.get('provider') || undefined;
         const since = url.searchParams.get('since') ?? undefined;
         const workspace = resolveListWorkspace(scope, url.searchParams.get('workspace'), options.fallbackCwd);
-        const sessions = await listSessionsForUi({ limit: limit + 1, offset, provider, since, workspace });
+        const archiveParam = url.searchParams.get('archive');
+        const archive = archiveParam === 'hot' || archiveParam === 'cold' ? archiveParam : 'include';
+        const sessions = await listSessionsForUi({ limit: limit + 1, offset, provider, since, workspace, archive });
         sendJson(res, 200, { sessions: sessions.slice(0, limit), hasMore: sessions.length > limit,
             ...(sessions.length > limit ? { nextOffset: offset + limit } : {}) });
         return true;
@@ -108,6 +111,7 @@ export async function handleSessionApi(pathname, url, res, options) {
         const workspace = resolveListWorkspace(scope, url.searchParams.get('workspace'), options.fallbackCwd);
         try {
             const retrieved = await retrieveSessions(query, { workspace, since, provider, limit,
+                archive: url.searchParams.get('archive') === 'cold' ? 'cold' : url.searchParams.get('archive') === 'hot' ? 'hot' : 'include',
                 mode: url.searchParams.get('mode') || undefined, model: url.searchParams.get('model') || undefined,
                 area: url.searchParams.get('area') || undefined, sessionId: url.searchParams.get('session') ?? undefined,
                 terms: url.searchParams.getAll('term').length ? url.searchParams.getAll('term') : undefined,

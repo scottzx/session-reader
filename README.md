@@ -611,6 +611,10 @@ dsh plugin --profile web add @1agents/session-reader
 
 DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。它挂在侧栏面板列表的「更多」菜单里：历史检索不是高频操作，因此不占用常驻的面板行，也不再自己插入侧栏按钮。菜单行沿用 DSH 菜单项的文字色、字号、行高、圆角与悬停样式，颜色跟随 DSH 的亮暗主题。
 
+### DSH 真归档（冷归档）
+
+DSH 原生归档只隐藏会话 ID，热列表仍然很慢。`1session dsh-archive --dry-run --days 7 --json` 可只读预览可迁移会话与可释放体积；确认后去掉 `--dry-run` 执行物理冷归档，`--list` 浏览冷归档，`--restore <id>` 无损还原。阅读链路默认同时覆盖 `~/.dsh/sessions/` 与 `~/.dsh/sessions-archive/`，冷会话带 `coldArchived` 标记；历史面板提供「仅冷归档」筛选与还原按钮。插件工具（`cold_archive_list` / `cold_archive_restore`）和 HTTP API 见 [冷归档说明](docs/cold-archive.md)。迁出只由 CLI 手动触发，插件不做自动归档。
+
 ### 在 DSH 中继续原会话
 
 安装并启用 `@1agents/acp-service` 的 DSH 插件，启动其配置的 acp-service 后，Claude、Codex、Grok 的历史详情提供「在 DSH 中继续原会话」。session-reader 读取历史并调用 ACP 插件的 `oneagentsAcpSessions` 服务；1acp 恢复原 Agent 的原生会话，后续输入继续发给它。原工作目录必须存在；不会改用当前目录或新建空会话。DSH 来源直接打开原有 DSH 会话，不复制或重写日志。

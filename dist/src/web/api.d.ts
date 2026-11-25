@@ -83,6 +83,7 @@ export declare function listSessionsForUi(options: {
     provider?: string;
     since?: string;
     workspace?: string;
+    archive?: 'include' | 'hot' | 'cold';
 }): Promise<import("../types.js").SessionRef[]>;
 /**
  * Shared JSON API used by the DSH plugin and `1session web`.

@@ -1,5 +1,5 @@
 export type { AgentProvider, BackgroundTask, DigestFocus, FileChange, FileTouch, GitCommit, ProviderStats, SessionOverview, SessionStats, TokenUsage, AsyncJob, CommandRecord, FactSource, FileGroup, FileRecord, Provenance, JobStatus, TurnDetail, TurnStatus, TurnSummary, UserTurnKind, UserTurnNote, NormalizedSession, SessionArtifact, SessionDigest, SessionRef, TurnEvent, TurnKind, TurningPoint, UnifiedTimelineEntry, WorkspaceDigest, } from './types.js';
-export { adapters, findResolvedByWorkspace, loadSession, type LoadOptions, findSessionsByWorkspace, listRecentSessions, listResolvedSessions, parseSession, parseSince, resolveSession, type ListOptions, type ResolvedSession, } from './resolver.js';
+export { adapters, findResolvedByWorkspace, loadSession, type LoadOptions, findSessionsByWorkspace, listRecentSessions, listResolvedSessions, matchesArchive, parseSession, parseSince, resolveSession, type ListOptions, type ResolvedSession, } from './resolver.js';
 export { distillSession, editedFiles, shellCommand } from './distiller.js';
 export { buildOverview } from './overview.js';
 export { classifyUserTurn } from './classify.js';
@@ -23,6 +23,7 @@ export { buildManifest, nodeIdentity, sessionUri, SESSION_CAPABILITIES, type Acc
 export { createServer, serve, type ServeOptions } from './serve/http.js';
 export { convertSessionToDshEvents, type DshSessionEvent, type ConvertOptions } from './dsh/adapter.js';
 export { apply, inject, name } from './dsh/index.js';
+export { archiveSessions, coldIndexPath, dshPaths, isColdArchivePath, listColdArchive, planArchive, restoreSession, type ArchiveOptions, type ArchivePlan, type ArchivePlanItem, type ArchiveResult, type ArchivedEntry, type ColdArchiveIndex, type DshPaths, type RestoreOptions, type RestoreResult, } from './dsh/archive.js';
 export { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact, contentPage } from './reader.js';
 export type { ReadOptions, ContentItem } from './reader.js';
 export { callsIn, toolResults } from './calls.js';

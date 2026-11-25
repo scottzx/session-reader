@@ -1,4 +1,4 @@
-export { adapters, findResolvedByWorkspace, loadSession, findSessionsByWorkspace, listRecentSessions, listResolvedSessions, parseSession, parseSince, resolveSession, } from './resolver.js';
+export { adapters, findResolvedByWorkspace, loadSession, findSessionsByWorkspace, listRecentSessions, listResolvedSessions, matchesArchive, parseSession, parseSince, resolveSession, } from './resolver.js';
 export { distillSession, editedFiles, shellCommand } from './distiller.js';
 export { buildOverview } from './overview.js';
 export { classifyUserTurn } from './classify.js';
@@ -21,6 +21,7 @@ export { buildManifest, nodeIdentity, sessionUri, SESSION_CAPABILITIES, } from '
 export { createServer, serve } from './serve/http.js';
 export { convertSessionToDshEvents } from './dsh/adapter.js';
 export { apply, inject, name } from './dsh/index.js';
+export { archiveSessions, coldIndexPath, dshPaths, isColdArchivePath, listColdArchive, planArchive, restoreSession, } from './dsh/archive.js';
 export { readTurnDirectory, readTurns, readEvents, readOriginalRecords, readCall, readArtifact, contentPage } from './reader.js';
 export { callsIn, toolResults } from './calls.js';
 export { retrieveSessions } from './retrieval.js';

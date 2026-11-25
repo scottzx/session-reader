@@ -14,10 +14,12 @@ normalizes all of them and answers questions about what actually happened.
 | `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | same, plus structured `exit_code` / `stderr` / `pid` |
 | `antigravity` | `~/.gemini/antigravity/brain/<uuid>/.../transcript.jsonl` | same, plus plan/walkthrough artifacts |
 | `grok` | `~/.grok/sessions/<encoded cwd>/<uuid>/chat_history.jsonl` | same, plus tool durations/outcomes, background-task receipts, goal plans |
-| `dsh` | `~/.dsh/sessions/<slug>/session-<uuid>/session.v{2,4}.jsonl[.zstd]` | same, plus native turn/step boundaries and per-message usage |
+| `dsh` | `~/.dsh/sessions/<slug>/session-<uuid>/session.v{2,4}.jsonl[.zstd]`; cold archive: `~/.dsh/sessions-archive/<slug>/<session-id>/` | same, plus native turn/step boundaries and per-message usage |
 
-Everything is derived from the raw files at read time. Nothing is written back to
-them, no daemon is involved, and no session is ever resumed or modified.
+Everything is derived from the raw files at read time. Reading never writes back
+to them, no daemon is involved, and no session is ever resumed or modified by a
+read. The one explicit operator command that *does* move history is
+`dsh-archive` (cold archive / restore); it always has a `--dry-run` preview.
 
 ## Bootstrap: get the CLI, then answer the question
 
@@ -272,6 +274,30 @@ timeline is usually the answer the user wanted.
 read it when a question needs something not covered above, such as filtering by
 provider, regex search, tuning context lines, or forcing an index rebuild.
 
+
+## DSH cold archive (physical archiving)
+
+DSH's native archive only hides an id in `~/.dsh/storages/workspace.json`; the
+transcripts remain in `~/.dsh/sessions/` and still slow down
+`ApiSessionList.list()`. The separate `dsh-archive` command physically moves
+eligible directories to `~/.dsh/sessions-archive/<workspace>/<session-id>/`,
+keeps `index.json` metadata and an atomic backup of `workspace.json`, and can
+restore them losslessly. All discovery, search, overview and turn reads cover
+both roots and mark affected refs with `coldArchived: true`.
+
+```sh
+1session dsh-archive --dry-run --days 7 --json   # read-only preview; no writes
+1session dsh-archive --days 7 --json             # actually move eligible sessions
+1session dsh-archive --list --json                # browse cold archive metadata
+1session dsh-archive --restore <session-id> --json # move one session back
+```
+
+Filters are available wherever sessions are listed: CLI `--archive hot|cold`,
+HTTP `?archive=hot|cold`, and DSH tools' `archive` argument. Default `include`
+reads both. Pinned sessions, sessions with an active `session.lock`, and
+existing archive targets are never moved/overwritten. Neither the reader nor the
+DSH plugin moves history automatically: only the operator running `dsh-archive`
+decides when to cold-archive. See `docs/cold-archive.md`.
 
 ## Opt-in semantic search (since 0.11.0)
 

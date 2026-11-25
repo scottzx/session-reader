@@ -6,6 +6,8 @@ export interface SessionCandidate {
   path: string;
   mtimeMs: number;
   sizeBytes: number;
+  /** The physical directory sits in the DSH cold archive, not the hot tree. */
+  coldArchived?: boolean;
 }
 
 export interface ProviderAdapter {

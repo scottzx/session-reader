@@ -117,10 +117,22 @@ function upsertEdge(
   ).run(edge.id, edge.id);
 }
 
+function resolveUniqueSessionRow(db: DatabaseSync, needle: string) {
+  try {
+    return findSessionRow(db, needle);
+  } catch (error) {
+    // An ambiguous prefix/UUID across providers cannot prove one exact target; drop it rather than guessing or aborting indexing.
+    if (error instanceof Error && error.message.startsWith('ambiguous session ID ')) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 /**
  * Derives L3 for one session from its stored events. Targets that do not
- * resolve to an indexed session are dropped — a dangling edge is worse than
- * no edge.
+ * resolve uniquely to an indexed session are dropped — a dangling or guessed
+ * edge is worse than no edge.
  */
 export function deriveEdges(db: DatabaseSync, id: string, session: NormalizedSession): number {
   db.exec('BEGIN IMMEDIATE');
@@ -133,7 +145,7 @@ export function deriveEdges(db: DatabaseSync, id: string, session: NormalizedSes
     let added = 0;
     for (const event of session.turns) {
       for (const candidate of invocationsOf(event)) {
-        const row = findSessionRow(db, candidate.target);
+        const row = resolveUniqueSessionRow(db, candidate.target);
         if (!row || row.id === id) continue;
         upsertEdge(db, id, row.id, candidate.relation, candidate, 'derived', 'tool:Bash+1session');
         added++;
@@ -174,8 +186,8 @@ export function captureRuntimeEdge(
   const caller = callerId?.trim();
   const relation = VERB_RELATION[verb];
   if (!caller || !relation) return;
-  const from = findSessionRow(db, caller);
-  const to = findSessionRow(db, target);
+  const from = resolveUniqueSessionRow(db, caller);
+  const to = resolveUniqueSessionRow(db, target);
   if (!from || !to || from.id === to.id) return;
   const now = new Date().toISOString();
   db.exec('BEGIN IMMEDIATE');

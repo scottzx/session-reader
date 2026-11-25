@@ -19,6 +19,14 @@ export const adapters = [
 const DEFAULT_SCAN = 60;
 /** A workspace filter rejects most candidates, so it needs a wider net. */
 const WORKSPACE_SCAN = 600;
+/** Cold state is a property of the physical transcript, not of the provider. */
+export function matchesArchive(ref, archive) {
+    if (archive === 'cold')
+        return ref.coldArchived === true;
+    if (archive === 'hot')
+        return ref.coldArchived !== true;
+    return true;
+}
 /** Accepts `24h`, `90m`, `7d`, `2026-09-01` or a Date. */
 export function parseSince(since) {
     if (!since)
@@ -64,6 +72,7 @@ export async function listResolvedSessions(options = {}) {
     const scoped = options.workspace ? canonicalizePath(options.workspace) : undefined;
     const workspace = scoped && scoped !== '/' ? scoped : undefined;
     const sinceMs = parseSince(options.since);
+    const archive = options.archive ?? 'include';
     const found = [];
     for (const adapter of adapters) {
         if (options.provider && adapter.provider !== options.provider)
@@ -72,6 +81,8 @@ export async function listResolvedSessions(options = {}) {
         let scanned = 0;
         const budget = options.scan ?? (workspace ? WORKSPACE_SCAN : DEFAULT_SCAN);
         for (const candidate of candidates) {
+            if (!matchesArchive(candidate, archive))
+                continue;
             if (sinceMs && candidate.mtimeMs < sinceMs)
                 break; // candidates are newest first
             if (scanned >= budget)
@@ -120,13 +131,15 @@ async function listIndexedSessions(options) {
     // Skip the all-files fingerprint sweep: the caller only wants whatever
     // the index already knows. Used by the DSH panel's lazy listing.
     if (options.refresh === false) {
-        return listSessionRows(db, query).map(refOf);
+        return listSessionRows(db, query).map(refOf).filter((ref) => matchesArchive(ref, options.archive));
     }
     const ids = [];
     for (const adapter of adapters) {
         if (options.provider && adapter.provider !== options.provider)
             continue;
         for (const candidate of await adapter.listCandidates()) {
+            if (!matchesArchive(candidate, options.archive))
+                continue;
             if (sinceMs && candidate.mtimeMs < sinceMs)
                 break; // candidates are newest first
             const result = await refreshSession(db, { adapter, candidate }, { edges: false }).catch((error) => {
@@ -138,7 +151,7 @@ async function listIndexedSessions(options) {
                 ids.push(result.id);
         }
     }
-    return listSessionRows(db, { ids, ...query }).map(refOf);
+    return listSessionRows(db, { ids, ...query }).map(refOf).filter((ref) => matchesArchive(ref, options.archive));
 }
 export async function findSessionsByWorkspace(workspacePath, options = {}) {
     return listRecentSessions({ ...options, limit: options.limit ?? 50, workspace: workspacePath });

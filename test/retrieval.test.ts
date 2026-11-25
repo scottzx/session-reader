@@ -276,7 +276,8 @@ test('projects CLI defaults to all projects, supports pages and scope, and valid
     await fs.writeFile(path.join(sessions, `${name}.jsonl`), JSON.stringify({ ...user('question', 'u1', timestamp), cwd }) + '\n');
   }
   const args = ['--import', import.meta.resolve('tsx'), path.resolve('bin/1session.ts'), 'projects'];
-  const env = { ...process.env, HOME: home, SESSION_READER_NO_INDEX: '0', SESSION_READER_CALLER_SESSION: '' };
+  const env: Record<string, string | undefined> = { ...process.env, HOME: home, SESSION_READER_NO_INDEX: '0', SESSION_READER_CALLER_SESSION: '' };
+  for (const key of ['DSH_HOME', 'DSH_SESSIONS_DIR', 'DSH_SESSIONS_ARCHIVE_DIR', 'DSH_WORKSPACE_STORAGE']) delete env[key];
   const run = (flags: string[]) => promisify(execFile)(process.execPath, [...args, ...flags], { env, cwd: local });
   const first = JSON.parse((await run(['--limit', '1', '--json'])).stdout);
   assert.equal(first.total, 2);

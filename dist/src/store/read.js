@@ -1,6 +1,7 @@
 import { selectSession } from '../identity.js';
 import { decodeText } from './nul.js';
 import { turnStartsFrom } from '../turns.js';
+import { isColdArchivePath } from '../dsh/archive.js';
 import { emptyProviderStats, } from '../types.js';
 export function sessionRow(db, id) {
     return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
@@ -81,6 +82,7 @@ export function refOf(row) {
         ...(row.ended_at === null ? {} : { updatedAt: row.ended_at }),
         sizeBytes: row.source_size,
         ...(row.ref_json ? JSON.parse(row.ref_json) : {}),
+        ...(isColdArchivePath(row.source_path) ? { coldArchived: true } : {}),
     };
 }
 /**

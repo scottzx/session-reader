@@ -1129,6 +1129,46 @@ test('re-deriving edges does not inflate the evidence count', async (t) => {
   }
 });
 
+test('deriveEdges skips ambiguous cross-provider session IDs instead of throwing', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'session-reader-edges-ambiguous-'));
+  resetStoreCache();
+  const db = await openStore(path.join(dir, 'index.db'));
+  try {
+    const insert = db.prepare(
+      `INSERT INTO sessions (id, provider, native_id, source_path, workspace, event_count, turn_count, source_size, source_mtime_ms, parser_version, extractor_version, edge_version)
+       VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 1, 1, 0)`,
+    );
+    const sharedUuid = 'bf72796d-cb88-4ab3-8d0f-59c27db93e76';
+    const uniqueUuid = '11111111-2222-4333-8444-555555555555';
+    const callerId = 'dsh:caller-0000-0000-0000-000000000001';
+    insert.run(callerId, 'dsh', 'caller-0000-0000-0000-000000000001', '/tmp/caller', '/tmp');
+    insert.run(`antigravity:${sharedUuid}`, 'antigravity', sharedUuid, '/tmp/ag', '/tmp');
+    insert.run(`dsh:${sharedUuid}`, 'dsh', sharedUuid, '/tmp/dsh', '/tmp');
+    insert.run(`dsh:${uniqueUuid}`, 'dsh', uniqueUuid, '/tmp/uniq', '/tmp');
+
+    const synthetic: NormalizedSession = {
+      ...readSession(db, sessionRow(db, callerId)!),
+      turns: [
+        {
+          id: 'caller#0',
+          index: 0,
+          kind: 'tool_call',
+          toolName: 'Bash',
+          toolArgs: { command: `1session overview bf72796d && 1session overview ${uniqueUuid}` },
+        },
+      ],
+    };
+    const added = deriveEdges(db, callerId, synthetic);
+    assert.equal(added, 1);
+    const edges = edgesOf(db, callerId);
+    assert.equal(edges.length, 1);
+    assert.equal(edges[0]?.to, `dsh:${uniqueUuid}`);
+  } finally {
+    resetStoreCache();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Search query layer
 // ---------------------------------------------------------------------------
