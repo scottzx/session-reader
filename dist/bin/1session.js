@@ -9,7 +9,7 @@ import { commandLedger, displayPath, errorLedger, fileLedger, jobLedger } from '
 import { listRecentSessions, loadSession } from '../src/resolver.js';
 import { listProjects, listProjectWeeks } from '../src/projects.js';
 import { retrieveSessions } from '../src/retrieval.js';
-import { archiveSessions, listColdArchive, restoreSession, DEFAULT_RETENTION_DAYS, } from '../src/dsh/archive.js';
+import { archiveSessions, listColdArchive, restoreSession, DEFAULT_KEEP_ACTIVE, DEFAULT_RETENTION_DAYS, } from '../src/dsh/archive.js';
 import { canonicalizePath } from '../src/util/paths.js';
 import { oneLine } from '../src/util/text.js';
 const USAGE = `1session — cross-agent session Read Plane
@@ -31,8 +31,9 @@ const USAGE = `1session — cross-agent session Read Plane
   1session workspace [path] [--since 24h] [--limit <n>] [--digest] [--focus <f>] [--json]
   1session index [<session-id>] [--all] [--scope <path>|cwd|global] [--force] [--since 30d]  建立/刷新索引
   1session index build|status|forget --semantic [--model qwen3|embeddinggemma2] [--session <id>] [--global] [--json]
-  1session dsh-archive [--list | --restore <session-id> | --session <session-id>] [--days <n>] [--dry-run] [--json]
-                           DSH 真归档（默认 7 天，仅已标记归档且非置顶）：冷迁出 / 列表 / 一键还原；--dry-run 完全只读
+  1session dsh-archive [--list | --restore <session-id> | --session <session-id>] [--days <n>] [--keep-active <n>] [--dry-run] [--json]
+                         DSH 真归档（默认 7 天）：已标记归档的会话照旧冷迁出；超过阈值的活跃会话也一并归档，
+                         但每个 pwd 至少保留 --keep-active（默认 3）条活跃会话；--dry-run 完全只读
    1session graph <session-id> [--json]                 会话之间的引用关系
   1session serve [--port 7777] [--host 127.0.0.1] [--token <t>] [--no-report]
                           起 HTTP Service，把本机会话接入 DreamMate Network
@@ -253,11 +254,15 @@ async function main() {
             const days = flags.days === undefined ? DEFAULT_RETENTION_DAYS : num(flags.days) ?? NaN;
             if (!Number.isFinite(days) || days < 0)
                 throw new Error('--days must be a non-negative number');
+            const keepActive = flags['keep-active'] === undefined ? DEFAULT_KEEP_ACTIVE : num(flags['keep-active']) ?? NaN;
+            if (!Number.isInteger(keepActive) || keepActive < 0)
+                throw new Error('--keep-active must be a non-negative integer');
             const sessionId = str(flags.session);
-            const result = await archiveSessions({ ...(sessionId ? { sessionId } : {}), days, dryRun });
+            const result = await archiveSessions({ ...(sessionId ? { sessionId } : {}), days, keepActive, dryRun });
+            const swept = result.eligible.filter((item) => item.rule === 'active').length;
             const report = [
-                `${dryRun ? '只读预览' : '已执行'}冷归档 · 条件：${days === 0 ? '全部已归档会话' : `mtime 早于 ${days} 天`}`,
-                `可迁移 ${result.eligible.length} 个会话 · 跳过 ${result.skipped.length} 个 · 可释放 ${(result.bytes / 1024 / 1024).toFixed(2)} MB`,
+                `${dryRun ? '只读预览' : '已执行'}冷归档 · 条件：${days === 0 ? '全部会话' : `mtime 早于 ${days} 天`} · 每个 pwd 至少保留 ${keepActive} 条活跃会话`,
+                `可迁移 ${result.eligible.length} 个会话（其中活跃会话 ${swept} 个） · 跳过 ${result.skipped.length} 个 · 可释放 ${(result.bytes / 1024 / 1024).toFixed(2)} MB`,
                 ...result.skipped.slice(0, 10).map((item) => `  跳过 ${item.sessionId.slice(0, 8)}：${item.reason}`),
                 ...(dryRun ? result.eligible.slice(0, 20).map((item) => `  将迁移 ${item.sessionId.slice(0, 8)}  ${item.workspaceDir}/${item.nativeDir}  ${(item.sizeBytes / 1024 / 1024).toFixed(2)} MB`) : []),
                 ...result.moved.map((item) => `  ${dryRun ? '将迁移' : '已迁移'} ${item.sessionId.slice(0, 8)}  ${item.workspaceDir}/${item.nativeDir}`),

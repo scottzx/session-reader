@@ -29,10 +29,15 @@ const PINNED = '33333333-3333-4333-8333-333333333333';
 const LOCKED = '44444444-4444-4444-8444-444444444444';
 const RECENT = '55555555-5555-4555-8555-555555555555';
 const LIVE = '66666666-6666-4666-8666-666666666666';
+const C = '77777777-7777-4777-8777-777777777777';
+const D = '88888888-8888-4888-8888-888888888888';
+const E = '99999999-9999-4999-8999-999999999999';
+const F = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const G = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
 interface Fixture {
   paths: DshPaths;
-  writeWorkspace(archived: string[], pinned?: string[]): Promise<void>;
+  writeWorkspace(archived: string[], pinned?: string[], grouped?: string[]): Promise<void>;
   makeSession(id: string, options?: { workspaceDir?: string; daysOld?: number; lock?: 'stale' | 'active' | 'pid'; title?: string }): Promise<string>;
   workspace(): Promise<any>;
 }
@@ -62,12 +67,12 @@ async function fixture(t: TestContext): Promise<Fixture> {
     await fs.rm(home, { recursive: true, force: true });
   });
 
-  const writeWorkspace = async (archived: string[], pinned: string[] = []) => {
+  const writeWorkspace = async (archived: string[], pinned: string[] = [], grouped: string[] = []) => {
     await fs.mkdir(path.dirname(paths.workspaceFile), { recursive: true });
     await fs.writeFile(paths.workspaceFile, JSON.stringify({
       unit: { name: 'dsh', version: 3 },
       global: { initialized: true, workspaceIds: [], archivedSessionIds: archived, pinnedSessionIds: pinned },
-      tables: { workspaces: {} },
+      tables: { workspaces: { 'workspace-1': { path: '/tmp/workspace-1', title: 'workspace-1', sessionIds: grouped.map((id) => `session-${id}`) } } },
     }, null, 2));
   };
 
@@ -136,6 +141,100 @@ test('default retention is 7 days, with only archived and unpinned sessions elig
   const plan = await planArchive();
   assert.deepEqual(plan.eligible.map((item) => item.sessionId), [A]);
   assert.deepEqual(plan.skipped.map((item) => [item.sessionId, item.reason]), [[PINNED, 'pinned session']]);
+});
+
+test('rule two sweeps stale active conversations, but every pwd keeps three active ones', async (t) => {
+  const f = await fixture(t);
+  await f.writeWorkspace([], [], [C, D, E, F, G]);
+  await f.makeSession(C, { daysOld: 60 });
+  await f.makeSession(D, { daysOld: 40 });
+  await f.makeSession(E, { daysOld: 30 });
+  await f.makeSession(F, { daysOld: 2 });
+  await f.makeSession(G, { daysOld: 1 });
+
+  const plan = await planArchive({ days: 30 });
+  // Two conversations stay active, so the pwd would drop below three: the
+  // newest stale one is kept instead.
+  assert.deepEqual(plan.eligible.map((item) => item.sessionId).sort(), [C, D].sort());
+  assert.deepEqual(plan.eligible.every((item) => item.rule === 'active'), true);
+  assert.deepEqual(plan.skipped.map((item) => [item.sessionId, item.reason]), [[E, 'kept active for the pwd floor']]);
+  assert.equal(plan.items.some((item) => item.sessionId === F || item.sessionId === G), false, 'recent conversations are not plan items');
+
+  const kept = await planArchive({ days: 30, keepActive: 1 });
+  assert.deepEqual(kept.eligible.map((item) => item.sessionId).sort(), [C, D, E].sort());
+});
+
+test('a session DSH never attached to a workspace is out of scope', async (t) => {
+  const f = await fixture(t);
+  await f.writeWorkspace([], [], [C]);
+  await f.makeSession(C, { daysOld: 60 });
+  await f.makeSession(D, { daysOld: 60 });
+
+  const plan = await planArchive({ days: 30 });
+  assert.deepEqual(plan.items.map((item) => item.sessionId), [C]);
+  assert.deepEqual(plan.eligible, []);
+  assert.deepEqual(plan.skipped.map((item) => [item.sessionId, item.reason]), [[C, 'kept active for the pwd floor']]);
+});
+
+test('a pinned session never takes a slot of the pwd floor', async (t) => {
+  const f = await fixture(t);
+  await f.writeWorkspace([], [PINNED], [C, D, PINNED]);
+  await f.makeSession(PINNED, { daysOld: 60 });
+  await f.makeSession(C, { daysOld: 50 });
+  await f.makeSession(D, { daysOld: 40 });
+
+  const plan = await planArchive({ days: 30 });
+  assert.deepEqual(plan.eligible, []);
+  assert.deepEqual(plan.skipped.map((item) => [item.sessionId, item.reason]).sort(),
+    [[C, 'kept active for the pwd floor'], [D, 'kept active for the pwd floor'], [PINNED, 'pinned session']].sort());
+});
+
+test('each pwd keeps its own floor', async (t) => {
+  const f = await fixture(t);
+  await f.writeWorkspace([], [], [C, D, E, F, G]);
+  await f.makeSession(C, { daysOld: 90, workspaceDir: 'one' });
+  await f.makeSession(D, { daysOld: 80, workspaceDir: 'one' });
+  await f.makeSession(E, { daysOld: 70, workspaceDir: 'one' });
+  await f.makeSession(F, { daysOld: 60, workspaceDir: 'one' });
+  await f.makeSession(G, { daysOld: 60, workspaceDir: 'two' });
+
+  const plan = await planArchive({ days: 30 });
+  // 'one' keeps three of its four stale conversations, 'two' keeps its only one.
+  assert.deepEqual(plan.eligible.map((item) => item.sessionId), [C]);
+  assert.deepEqual(plan.skipped.map((item) => item.sessionId).sort(), [D, E, F, G].sort());
+});
+
+test('an explicit session sweeps one active conversation whatever the floor says', async (t) => {
+  const f = await fixture(t);
+  await f.writeWorkspace([], [], [C, D]);
+  await f.makeSession(C, { daysOld: 60 });
+  await f.makeSession(D, { daysOld: 1 });
+
+  const plan = await planArchive({ days: 30, sessionId: C });
+  assert.deepEqual(plan.eligible.map((item) => item.sessionId), [C]);
+  const result = await archiveSessions({ days: 30, sessionId: C });
+  assert.deepEqual(result.moved.map((entry) => entry.sessionId), [C]);
+  assert.deepEqual((await f.workspace()).global.archivedSessionIds, []);
+  await assert.rejects(planArchive({ sessionId: LIVE }), /not archived in DSH/);
+});
+
+test('the CLI takes --keep-active and reports the floor it applied', async (t) => {
+  const f = await fixture(t);
+  await f.writeWorkspace([], [], [C, D]);
+  await f.makeSession(C, { daysOld: 60 });
+  await f.makeSession(D, { daysOld: 40 });
+  const run = async (...args: string[]) => JSON.parse((await promisify(execFile)(process.execPath, [
+    '--import', 'tsx', path.resolve('bin/1session.ts'), 'dsh-archive', '--dry-run', '--days', '30', ...args, '--json',
+  ], { env: { ...process.env, SESSION_READER_CALLER_SESSION: '' } })).stdout);
+
+  const floored = await run();
+  assert.equal(floored.dryRun, true);
+  assert.equal(floored.eligible.length, 0, 'the default floor keeps three conversations alive');
+  const open = await run('--keep-active', '0');
+  assert.equal(open.eligible.length, 2);
+  await assert.rejects(promisify(execFile)(process.execPath, [
+    '--import', 'tsx', path.resolve('bin/1session.ts'), 'dsh-archive', '--dry-run', '--keep-active', 'many', '--json',
+  ], { env: { ...process.env, SESSION_READER_CALLER_SESSION: '' } }), /--keep-active must be a non-negative integer/);
 });
 
 test('archiveSessions moves losslessly, writes an indexed metadata record and a workspace backup; restore reverses it', async (t) => {

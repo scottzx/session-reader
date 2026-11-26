@@ -1,6 +1,8 @@
 /** Empty lock files are DSH tombstones; only fresh or PID-bearing locks are active. */
 export declare const DEFAULT_LOCK_FRESH_MS: number;
 export declare const DEFAULT_RETENTION_DAYS = 7;
+/** Active conversations every pwd keeps after a pass; 0 disables the floor. */
+export declare const DEFAULT_KEEP_ACTIVE = 3;
 export interface DshPaths {
     home: string;
     sessionsDir: string;
@@ -42,6 +44,8 @@ export interface ArchivePlanItem {
     sizeBytes: number;
     status: 'eligible' | 'skipped' | 'conflict';
     reason?: string;
+    /** `archived` is a session DSH already hid; `active` is one this pass sweeps. */
+    rule: 'archived' | 'active';
 }
 export interface ArchivePlan {
     dryRun: boolean;
@@ -55,6 +59,12 @@ export interface ArchiveOptions {
     sessionId?: string;
     /** Age in days measured from the session directory mtime; 0 means all archived sessions. */
     days?: number;
+    /**
+     * Active conversations every pwd keeps after the pass. When a pwd would
+     * drop below it, the newest sessions this pass would sweep stay unarchived.
+     * Zero disables the floor.
+     */
+    keepActive?: number;
     dryRun?: boolean;
     /** Consider a lock active when refreshed within this many ms. */
     lockFreshMs?: number;

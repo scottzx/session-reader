@@ -18,6 +18,8 @@ import { expandHome, isInside } from '../util/paths.js';
 /** Empty lock files are DSH tombstones; only fresh or PID-bearing locks are active. */
 export const DEFAULT_LOCK_FRESH_MS = 10 * 60 * 1000;
 export const DEFAULT_RETENTION_DAYS = 7;
+/** Active conversations every pwd keeps after a pass; 0 disables the floor. */
+export const DEFAULT_KEEP_ACTIVE = 3;
 const INDEX_VERSION = 1;
 
 export interface DshPaths {
@@ -103,16 +105,25 @@ interface WorkspaceState {
   raw: string | undefined;
   archived: string[];
   pinned: string[];
+  /** Session ids DSH attached to a workspace; every other session is ungrouped. */
+  grouped: string[];
 }
 
 async function readWorkspaceState(paths: DshPaths): Promise<WorkspaceState> {
   const raw = await fs.readFile(paths.workspaceFile, 'utf8').catch(() => undefined);
-  if (!raw) return { parsed: {}, raw: undefined, archived: [], pinned: [] };
+  if (!raw) return { parsed: {}, raw: undefined, archived: [], pinned: [], grouped: [] };
   const parsed = JSON.parse(raw) as Record<string, any>;
   const global = (parsed?.global ?? {}) as Record<string, unknown>;
   const ids = (key: string): string[] => Array.isArray(global[key])
     ? (global[key] as unknown[]).filter((id): id is string => typeof id === 'string') : [];
-  return { parsed, raw, archived: ids('archivedSessionIds'), pinned: ids('pinnedSessionIds') };
+  const workspaces = (parsed?.tables?.workspaces ?? {}) as Record<string, { sessionIds?: unknown }>;
+  const grouped: string[] = [];
+  for (const workspace of Object.values(workspaces)) {
+    const members = workspace?.sessionIds;
+    if (!Array.isArray(members)) continue;
+    for (const id of members) if (typeof id === 'string') grouped.push(id);
+  }
+  return { parsed, raw, archived: ids('archivedSessionIds'), pinned: ids('pinnedSessionIds'), grouped };
 }
 
 async function writeAtomic(file: string, text: string): Promise<void> {
@@ -186,6 +197,8 @@ export interface ArchivePlanItem {
   sizeBytes: number;
   status: 'eligible' | 'skipped' | 'conflict';
   reason?: string;
+  /** `archived` is a session DSH already hid; `active` is one this pass sweeps. */
+  rule: 'archived' | 'active';
 }
 
 export interface ArchivePlan {
@@ -201,27 +214,57 @@ export interface ArchiveOptions {
   sessionId?: string;
   /** Age in days measured from the session directory mtime; 0 means all archived sessions. */
   days?: number;
+  /**
+   * Active conversations every pwd keeps after the pass. When a pwd would
+   * drop below it, the newest sessions this pass would sweep stay unarchived.
+   * Zero disables the floor.
+   */
+  keepActive?: number;
   dryRun?: boolean;
   /** Consider a lock active when refreshed within this many ms. */
   lockFreshMs?: number;
   paths?: DshPaths;
 }
 
+/** One pwd's bookkeeping for the active-conversation floor. */
+interface PwdGroup {
+  /** Active conversations that stay visible after this pass. */
+  remaining: number;
+  /** Sessions this pass would sweep, oldest first. */
+  candidates: ArchivePlanItem[];
+}
+
 async function plan(options: ArchiveOptions = {}): Promise<ArchivePlan> {
   const paths = options.paths ?? dshPaths();
   const days = options.days ?? DEFAULT_RETENTION_DAYS;
   if (!Number.isFinite(days) || days < 0) throw new Error('days must be a non-negative number');
+  const keepActive = options.keepActive ?? DEFAULT_KEEP_ACTIVE;
+  if (!Number.isInteger(keepActive) || keepActive < 0) throw new Error('keepActive must be a non-negative integer');
   const state = await readWorkspaceState(paths);
   const archived = new Set(state.archived.map(normalizeDshId));
   const pinned = new Set(state.pinned.map(normalizeDshId));
+  const grouped = new Set(state.grouped.map(normalizeDshId));
   const wanted = options.sessionId ? normalizeDshId(options.sessionId) : undefined;
-  if (wanted && !archived.has(wanted)) throw new Error(`session is not archived in DSH: ${options.sessionId}`);
+  // Rule one takes the sessions DSH already hid; rule two sweeps the sessions
+  // DSH attached to a workspace. A session in neither set is out of scope.
+  if (wanted && !archived.has(wanted) && !grouped.has(wanted)) {
+    throw new Error(`session is not archived in DSH and not attached to a workspace: ${options.sessionId}`);
+  }
 
   const index = await readColdIndex(paths);
   const known = new Set(index.entries.map((entry) => normalizeDshId(entry.sessionId)));
   const cutoffMs = days > 0 ? Date.now() - days * 86_400_000 : undefined;
   const items: ArchivePlanItem[] = [];
+  const groups = new Map<string, PwdGroup>();
   let foundWanted = false;
+
+  const groupOf = (workspaceDir: string): PwdGroup => {
+    const existing = groups.get(workspaceDir);
+    if (existing) return existing;
+    const created: PwdGroup = { remaining: 0, candidates: [] };
+    groups.set(workspaceDir, created);
+    return created;
+  };
 
   for (const workspaceDir of await fs.readdir(paths.sessionsDir).catch(() => [] as string[])) {
     if (!safeDirName(workspaceDir)) continue;
@@ -231,7 +274,9 @@ async function plan(options: ArchiveOptions = {}): Promise<ArchivePlan> {
       if (!safeDirName(nativeDir)) continue;
       const sessionId = normalizeDshId(nativeDir);
       if (wanted && sessionId !== wanted) continue;
-      if (!archived.has(sessionId)) continue;
+      const isArchived = archived.has(sessionId);
+      // A session DSH never attached to a workspace stays out of rule two.
+      if (!isArchived && !grouped.has(sessionId)) continue;
       foundWanted = true;
       const from = path.join(workspacePath, nativeDir);
       const stat = await fs.stat(from).catch(() => undefined);
@@ -242,17 +287,50 @@ async function plan(options: ArchiveOptions = {}): Promise<ArchivePlan> {
         sessionId, storageId: storageDshId(sessionId), nativeDir, workspaceDir,
         from, to, mtimeMs: activeMs, sizeBytes: await dirSize(from),
         status: 'eligible',
+        rule: isArchived ? 'archived' : 'active',
       };
-      if (pinned.has(sessionId)) Object.assign(item, { status: 'skipped', reason: 'pinned session' });
+      const group = groupOf(workspaceDir);
+      const isPinned = pinned.has(sessionId);
+      const tooRecent = !wanted && cutoffMs !== undefined && activeMs > cutoffMs;
+
+      if (!isArchived && tooRecent) {
+        // Still active and visible: it counts towards the pwd's floor.
+        if (!isPinned) group.remaining += 1;
+        continue;
+      }
+      if (isPinned) Object.assign(item, { status: 'skipped', reason: 'pinned session' });
       else if (known.has(sessionId)) Object.assign(item, { status: 'skipped', reason: 'already cold-archived' });
       else if (await isActiveLock(from, options.lockFreshMs ?? DEFAULT_LOCK_FRESH_MS)) Object.assign(item, { status: 'skipped', reason: 'active session.lock' });
-      else if (!wanted && cutoffMs && activeMs > cutoffMs) Object.assign(item, { status: 'skipped', reason: 'newer than retention window' });
+      else if (tooRecent) Object.assign(item, { status: 'skipped', reason: 'newer than retention window' });
       else if (await fs.lstat(to).then(() => true).catch(() => false)) Object.assign(item, { status: 'conflict', reason: 'archive target already exists' });
       items.push(item);
+
+      if (!isArchived) {
+        // Rule two sweeps a session only when every check passes, and a pinned
+        // session never takes a slot of the floor.
+        if (item.status === 'eligible') group.candidates.push(item);
+        else if (!isPinned) group.remaining += 1;
+      }
     }
   }
 
-  if (wanted && !foundWanted) throw new Error(`archived session directory not found: ${options.sessionId}`);
+  if (wanted && !foundWanted) throw new Error(`session directory not found: ${options.sessionId}`);
+
+  // Every pwd keeps `keepActive` active conversations: when this pass would
+  // leave it with fewer, the newest sessions it would sweep stay unarchived.
+  if (!wanted && keepActive > 0) {
+    for (const group of groups.values()) {
+      group.candidates.sort((left, right) => left.mtimeMs - right.mtimeMs);
+      let deficit = keepActive - group.remaining;
+      for (let index = group.candidates.length - 1; index >= 0 && deficit > 0; index -= 1) {
+        const item = group.candidates[index]!;
+        item.status = 'skipped';
+        item.reason = 'kept active for the pwd floor';
+        deficit -= 1;
+      }
+    }
+  }
+
   items.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return {
     dryRun: options.dryRun === true,

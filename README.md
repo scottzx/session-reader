@@ -613,7 +613,7 @@ DSH 侧栏中的「历史会话」打开跨 Agent 会话浏览器。它挂在侧
 
 ### DSH 真归档（冷归档）
 
-DSH 原生归档只隐藏会话 ID，热列表仍然很慢。`1session dsh-archive --dry-run --days 7 --json` 可只读预览可迁移会话与可释放体积；确认后去掉 `--dry-run` 执行物理冷归档，`--list` 浏览冷归档，`--restore <id>` 无损还原。阅读链路默认同时覆盖 `~/.dsh/sessions/` 与 `~/.dsh/sessions-archive/`，冷会话带 `coldArchived` 标记；历史面板提供「仅冷归档」筛选与还原按钮。插件工具（`cold_archive_list` / `cold_archive_restore`）和 HTTP API 见 [冷归档说明](docs/cold-archive.md)。迁出只由 CLI 手动触发，插件不做自动归档。
+DSH 原生归档只隐藏会话 ID，热列表仍然很慢。`1session dsh-archive --dry-run --days 7 --json` 可只读预览可迁移会话与可释放体积；确认后去掉 `--dry-run` 执行物理冷归档，`--list` 浏览冷归档，`--restore <id>` 无损还原。除已在 DSH 中标记归档的会话外，静默超过阈值的**活跃会话**也一并归档，但每个 pwd 至少保留 3 条活跃会话（`--keep-active <n>` 可调，0 = 不保底）；DSH 没挂到工作区的未分组会话不参与。阅读链路默认同时覆盖 `~/.dsh/sessions/` 与 `~/.dsh/sessions-archive/`，冷会话带 `coldArchived` 标记；历史面板提供「仅冷归档」筛选与还原按钮。插件工具（`cold_archive_list` / `cold_archive_restore`）和 HTTP API 见 [冷归档说明](docs/cold-archive.md)。迁出只由 CLI 手动触发，插件不做自动归档。
 
 ### 在 DSH 中继续原会话
 
