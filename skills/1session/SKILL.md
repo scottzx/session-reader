@@ -293,13 +293,13 @@ both roots and mark affected refs with `coldArchived: true`.
 1session dsh-archive --restore <session-id> --json # move one session back
 ```
 
-Two rules run in one pass: sessions DSH already archived are moved as before,
-and active sessions silent past the threshold are swept too. Every pwd keeps at
-least three active conversations (`--keep-active <n>`, `0` disables it): when a
-pass would leave a pwd with fewer, the newest sessions it would sweep stay.
-Ungrouped sessions (DSH attached them to no workspace) are out of scope, and a
-pinned session never takes a slot of the floor. An explicit `--session <id>`
-ignores both the threshold and the floor.
+Two rules run in one pass: sessions DSH already archived are moved immediately
+at any age, and active sessions silent past the threshold are swept too. Every
+pwd keeps at least three active conversations (`--keep-active <n>`, `0` disables
+it): when a pass would leave a pwd with fewer, the newest sessions it would
+sweep stay. Ungrouped sessions (DSH attached them to no workspace) are out of
+scope, and a pinned session never takes a slot of the floor. An explicit
+`--session <id>` ignores both the threshold and the floor.
 
 Filters are available wherever sessions are listed: CLI `--archive hot|cold`,
 HTTP `?archive=hot|cold`, and DSH tools' `archive` argument. Default `include`

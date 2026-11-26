@@ -211,6 +211,8 @@ async function plan(options = {}) {
             const group = groupOf(workspaceDir);
             const isPinned = pinned.has(sessionId);
             const tooRecent = !wanted && cutoffMs !== undefined && activeMs > cutoffMs;
+            // Eligibility: manually archived (any age) OR stale past the threshold.
+            // A fresh active session is not a candidate and counts towards the floor.
             if (!isArchived && tooRecent) {
                 // Still active and visible: it counts towards the pwd's floor.
                 if (!isPinned)
@@ -223,8 +225,6 @@ async function plan(options = {}) {
                 Object.assign(item, { status: 'skipped', reason: 'already cold-archived' });
             else if (await isActiveLock(from, options.lockFreshMs ?? DEFAULT_LOCK_FRESH_MS))
                 Object.assign(item, { status: 'skipped', reason: 'active session.lock' });
-            else if (tooRecent)
-                Object.assign(item, { status: 'skipped', reason: 'newer than retention window' });
             else if (await fs.lstat(to).then(() => true).catch(() => false))
                 Object.assign(item, { status: 'conflict', reason: 'archive target already exists' });
             items.push(item);

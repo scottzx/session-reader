@@ -107,7 +107,7 @@ async function fixture(t: TestContext): Promise<Fixture> {
   };
 }
 
-test('planArchive is read-only and skips pinned, actively locked, recent, and non-archived sessions', async (t) => {
+test('planArchive is read-only and skips pinned and actively locked sessions', async (t) => {
   const f = await fixture(t);
   await f.writeWorkspace([A, PINNED, LOCKED, RECENT], [PINNED]);
   await f.makeSession(A, { daysOld: 60, lock: 'stale' });
@@ -117,9 +117,11 @@ test('planArchive is read-only and skips pinned, actively locked, recent, and no
   await f.makeSession(LIVE, { daysOld: 60 });
 
   const plan = await planArchive({ days: 30 });
-  assert.deepEqual(plan.eligible.map((item) => item.sessionId), [A]);
+  // A manually archived session is eligible at any age — the retention
+  // threshold only gates active conversations.
+  assert.deepEqual(plan.eligible.map((item) => item.sessionId).sort(), [A, RECENT].sort());
   assert.deepEqual(Object.fromEntries(plan.skipped.map((item) => [item.sessionId, item.reason])), {
-    [PINNED]: 'pinned session', [LOCKED]: 'active session.lock', [RECENT]: 'newer than retention window',
+    [PINNED]: 'pinned session', [LOCKED]: 'active session.lock',
   });
   await assert.rejects(fs.stat(f.paths.archiveDir), { code: 'ENOENT' });
   assert.deepEqual((await f.workspace()).global.archivedSessionIds, [A, PINNED, LOCKED, RECENT]);
@@ -141,6 +143,24 @@ test('default retention is 7 days, with only archived and unpinned sessions elig
   const plan = await planArchive();
   assert.deepEqual(plan.eligible.map((item) => item.sessionId), [A]);
   assert.deepEqual(plan.skipped.map((item) => [item.sessionId, item.reason]), [[PINNED, 'pinned session']]);
+});
+
+test('rule one ignores the retention window: a fresh manually archived session is eligible', async (t) => {
+  const f = await fixture(t);
+  await f.writeWorkspace([RECENT], [], [C]);
+  await f.makeSession(RECENT, { daysOld: 0 });
+  await f.makeSession(C, { daysOld: 0 });
+
+  const plan = await planArchive({ days: 7 });
+  assert.deepEqual(plan.eligible.map((item) => [item.sessionId, item.rule]), [[RECENT, 'archived']]);
+  assert.deepEqual(plan.skipped, []);
+  // A fresh active session is not a candidate at all, so it does not appear.
+  assert.equal(plan.items.some((item) => item.sessionId === C), false);
+
+  const result = await archiveSessions({ days: 7 });
+  assert.deepEqual(result.moved.map((entry) => entry.sessionId), [RECENT]);
+  assert.deepEqual((await f.workspace()).global.archivedSessionIds, []);
+  assert.equal(await fs.stat(path.join(f.paths.sessionsDir, 'project', `session-${C}`)).then(() => true), true);
 });
 
 test('rule two sweeps stale active conversations, but every pwd keeps three active ones', async (t) => {

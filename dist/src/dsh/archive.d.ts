@@ -57,7 +57,11 @@ export interface ArchivePlan {
 }
 export interface ArchiveOptions {
     sessionId?: string;
-    /** Age in days measured from the session directory mtime; 0 means all archived sessions. */
+    /**
+     * Age in days measured from the session directory mtime; 0 ignores it.
+     * A manually archived session is eligible at any age; the threshold only
+     * gates active sessions.
+     */
     days?: number;
     /**
      * Active conversations every pwd keeps after the pass. When a pwd would
